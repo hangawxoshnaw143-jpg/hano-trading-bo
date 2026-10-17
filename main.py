@@ -14,19 +14,32 @@ log = logging.getLogger("hano-btc-ai")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INTERVAL_SECONDS = int(os.getenv("ANALYSIS_INTERVAL_SECONDS", "3600"))
-BINANCE = "https://api.binance.com/api/v3/klines"
-RSS_FEEDS = [
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://www.federalreserve.gov/feeds/press_all.xml",
-]
+KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 
 def get_candles(interval="1h", limit=120):
-    response = requests.get(BINANCE, params={
-        "symbol": "BTCUSDT", "interval": interval, "limit": limit
-    }, timeout=15)
+    # Use Kraken public candles because Binance returned HTTP 451 on Railway.
+    minutes = {"1h": 60, "15m": 15, "4h": 240, "1d": 1440}.get(interval)
+    if minutes is None:
+        raise ValueError("Unsupported candle interval")
+    response = requests.get(
+        KRAKEN_OHLC,
+        params={"pair": "XBTUSD", "interval": minutes},
+        headers={"User-Agent": "HANO-BTC-AI/1.0"},
+        timeout=20,
+    )
     response.raise_for_status()
-    rows = response.json()
-    return [float(row[4]) for row in rows[:-1]]  # completed candles only
+    payload = response.json()
+    if payload.get("error"):
+        raise RuntimeError("Kraken returned an API error")
+    result = payload.get("result", {})
+    pair_key = next((key for key in result if key != "last"), None)
+    if not pair_key:
+        raise RuntimeError("Kraken returned no BTC candle data")
+    rows = result[pair_key]
+    closes = [float(row[4]) for row in rows[:-1]]
+    if len(closes) < 60:
+        raise RuntimeError("Not enough completed BTC candles returned")
+    return closes[-limit:]
 
 def ema(values, period):
     alpha = 2 / (period + 1)
