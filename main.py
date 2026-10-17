@@ -285,13 +285,13 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         message = analyze()
-        direction_marker = "🎯 ئاراستە: "
+        direction_marker = "🎯 ئەنجام: "
         direction = next(
             (line.split(direction_marker, 1)[1].strip()
              for line in message.splitlines() if direction_marker in line),
             "WAIT",
         )
-        candle_marker = "🕒 کاتی کەندڵی تەواوبووی H1 (UTC): "
+        candle_marker = "🕒 کەندڵی H1 (UTC): "
         candle_time = next(
             (line.split(candle_marker, 1)[1].strip()
              for line in message.splitlines() if candle_marker in line),
