@@ -143,7 +143,12 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
             "WAIT",
         )
         previous = context.application.bot_data.get("last_notified_direction")
-        # Notify only for a new BUY/SELL signal; WAIT resets the signal state.
+        # On startup/restart, establish a baseline without re-sending an existing signal.
+        if previous is None:
+            context.application.bot_data["last_notified_direction"] = direction
+            log.info("Signal watcher initialized with current direction: %s; no alert sent", direction)
+            return
+        # Notify only when direction changes into BUY/SELL; WAIT resets the signal state.
         if direction in ("BUY", "SELL") and direction != previous:
             await context.bot.send_message(chat_id=chat_id, text=message)
             context.application.bot_data["last_notified_direction"] = direction
