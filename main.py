@@ -9,6 +9,9 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
+# Keep HTTP client request URLs out of runtime logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("hano-btc-ai")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
