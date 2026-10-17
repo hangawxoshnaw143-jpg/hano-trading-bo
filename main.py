@@ -209,6 +209,7 @@ def analyze():
         tp = entry - 2.0 * (sl - entry)
 
     candle_time = datetime.fromtimestamp(h1[-1]["time"], timezone.utc).strftime("%Y-%m-%d %H:%M")
+    created_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     news = headlines()
     news_text = "\n".join("• " + item for item in news) if news else "هەواڵی RSS بەردەست نییە."
     if entry is not None:
@@ -220,50 +221,57 @@ def analyze():
     else:
         risk_text = "Entry/SL/TP: دیاری نەکراوە؛ مەرجەکانی سیگناڵ تەواو نین."
     return (
-        "🤖 HANO BTC AI — BTC/USD (Kraken)\n"
-        f"🕒 کاتی کەندڵی تەواوبووی H1 (UTC): {candle_time}\n"
-        f"💵 نرخی کەندڵی H1: {money(price)}\n"
-        f"🎯 ئاراستە: {direction}\n"
-        f"🧠 هۆکار: {reason}\n\n"
-        "📊 MULTI-TIMEFRAME\n"
-        f"H4: {s4['trend']} | EMA20 {money(s4['ema20'])} / EMA50 {money(s4['ema50'])}\n"
-        f"H1: {s1['trend']} | EMA20 {money(s1['ema20'])} / EMA50 {money(s1['ema50'])} | RSI {s1['rsi']:.1f}\n"
-        f"M15: {s15['trend']} | RSI {s15['rsi']:.1f}\n\n"
-        "🧩 MARKET STRUCTURE\n"
-        f"پێکهاتە: {structure}\n"
-        f"Support: {money(support)} | Resistance: {money(resistance)}\n"
-        f"FVG (M15): {fvg}\n"
-        f"Volume H1 / میانگینی 20 کەندڵ: {volume_ratio:.2f}x\n"
-        f"ATR(14) H1: {money(volatility)}\n\n"
-        "🛡️ پلانی ڕیسک\n" + risk_text + "\n\n"
-        "📰 هەواڵ (CoinDesk / Federal Reserve)\n" + news_text + "\n\n"
-        "⚠️ شیکارییە، نەک ڕاوێژی دارایی. Entry/SL/TP خەمڵاندنن؛ پێش بەکارهێنان لە Demo تاقی بکەرەوە. بۆتەکە هیچ مامەڵەیەک ئۆتۆماتیکی ناکات."
+        "🤖 HANO BTC AI | BTC/USD • KRAKEN\\n"
+        "━━━━━━━━━━━━━━━━━━\\n"
+        f"🕒 کەندڵی H1 (UTC): {candle_time}\\n"
+        f"🆕 کاتی دروستکردنی شیکاری (UTC): {created_time}\\n"
+        f"💵 نرخی دوا کەندڵی تەواوبوو: {money(price)}\\n\\n"
+        f"🎯 ئەنجام: {direction}\\n"
+        f"🧠 هۆکاری سەرەکی: {reason}\\n\\n"
+        "📊 ئاراستەی تایمفریمەکان\\n"
+        f"• H4: {s4['trend']} | EMA20: {money(s4['ema20'])} | EMA50: {money(s4['ema50'])}\\n"
+        f"• H1: {s1['trend']} | EMA20: {money(s1['ema20'])} | EMA50: {money(s1['ema50'])} | RSI: {s1['rsi']:.1f}\\n"
+        f"• M15: {s15['trend']} | RSI: {s15['rsi']:.1f}\\n\\n"
+        "🔎 نیشانە تەکنیکییەکان\\n"
+        f"• Market Structure: {structure}\\n"
+        f"• Support: {money(support)}\\n"
+        f"• Resistance: {money(resistance)}\\n"
+        f"• FVG لە M15: {fvg}\\n"
+        f"• Volumeی H1 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\\n"
+        f"• ATR(14) لە H1: {money(volatility)}\\n\\n"
+        "🛡️ پلانی مامەڵە و ڕیسک\\n" + risk_text + "\\n\\n"
+        "📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)\\n" + news_text + "\\n\\n"
+        "━━━━━━━━━━━━━━━━━━\\n"
+        "⚠️ تەنها شیکارییە؛ بۆتەکە مامەڵە ناکات. Entry/SL/TP خەمڵاندنی پلاندانانە و دڵنیایی نییە. پێش بەکارهێنان لە Demo تاقی بکەرەوە."
     )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "بەخێربێیت بۆ HANO BTC AI — BTC/USD.\n"
-        "/signal — شیکاری پێشکەوتووی BTC\n/help — ڕێنمایی\n"
-        "بۆتەکە شیکاری و ئاگادارکردنەوە دەدات؛ مامەڵە ناکات."
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        "🤖 بەخێربێیت بۆ HANO BTC AI\\n"
+        "بازاڕ: BTC/USD لە Kraken\\n\\n"
+        "📊 /signal — شیکاری تەواوی بازاڕ\\n"
+        "📖 /help — فەرمان و ڕوونکردنەوە\\n\\n"
+        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی: تەنها کاتێک ئاراستەی BUY/SELL پشتڕاست بێت و بگۆڕێت.\\n"
+        "🛡️ بۆتەکە شیکاری دەکات، بەڵام هیچ مامەڵەیەک ناکات."
+    )async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "فەرمانەکان:\n/start — دەستپێکردن\n/signal — شیکاری BTC\n\n"
-        "شیکاری: H4/H1/M15، EMA، RSI، ATR، پێکهاتەی بازاڕ، S/R، FVG، Volume و هەواڵی RSS.\n"
-        "ئاگادارکردنەوەی ئۆتۆماتیکی لەسەر گۆڕانی ئاراستەی سیگناڵ کار دەکات."
-    )
-
-
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("شیکاری پێشکەوتوو دەکرێت؛ تکایە چاوەڕێ بکە...")
+        "📖 ڕێنمایی HANO BTC AI\\n\\n"
+        "/start — پەیامی دەستپێک\\n"
+        "/signal — نوێترین شیکاری BTC/USD\\n"
+        "/help — ئەم ڕێنماییە\\n\\n"
+        "لە شیکارییەکەدا: ئاراستە و هۆکار، H4/H1/M15، EMA20/50، RSI، ATR، Support/Resistance، Market Structure، FVG، Volume، Entry/Stop Loss/Take Profit و سەردێڕی هەواڵ دەبینیت.\\n\\n"
+        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی تەنها بۆ گۆڕانی ئاراستەی BUY/SELL ـی پشتڕاستکراوەیە؛ WAIT سیگناڵی مامەڵە نییە.\\n"
+        "⚠️ بۆتەکە تەنها شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات."
+    )async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(analyze())
     except Exception:
         log.exception("analysis failed")
-        await update.message.reply_text("شیکاری ئێستا سەرکەوتوو نەبوو. دواتر دووبارە هەوڵ بدە.")
+        await update.message.reply_text(
+            "⚠️ ئێستا نەتوانرا شیکاری BTC تەواو بکرێت.\\n"
+            "هۆکارەکە لە log ـی بۆتەکە تۆمار کراوە؛ تکایە دواتر /signal دووبارە بکەرەوە."
+        )
 
 
 async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
