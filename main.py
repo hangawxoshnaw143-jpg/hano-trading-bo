@@ -130,13 +130,27 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("analysis failed")
         await update.message.reply_text("ئێستا شیکاری بەردەست نییە. دواتر دووبارە هەوڵ بدە.")
 
-async def hourly_job(context: ContextTypes.DEFAULT_TYPE):
-    if not CHAT_ID:
+async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = CHAT_ID
+    if not chat_id:
         return
     try:
-        await context.bot.send_message(chat_id=CHAT_ID, text=analyze())
+        message = analyze()
+        marker = "🎯 ئاراستە: "
+        direction = next(
+            (line.split(marker, 1)[1].strip() for line in message.splitlines()
+             if marker in line),
+            "WAIT",
+        )
+        previous = context.application.bot_data.get("last_notified_direction")
+        # Notify only for a new BUY/SELL signal; WAIT resets the signal state.
+        if direction in ("BUY", "SELL") and direction != previous:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            context.application.bot_data["last_notified_direction"] = direction
+        elif direction == "WAIT":
+            context.application.bot_data["last_notified_direction"] = "WAIT"
     except Exception:
-        log.exception("hourly analysis failed")
+        log.exception("signal watch failed")
 
 def main():
     if not TOKEN:
@@ -145,8 +159,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("signal", signal))
+    # Check frequently and send only when a fresh BUY/SELL signal appears.
+    # The analysis itself uses completed H1 candles.
     if CHAT_ID:
-        app.job_queue.run_repeating(hourly_job, interval=INTERVAL_SECONDS, first=15)
+        app.job_queue.run_repeating(signal_watch_job, interval=60, first=15)
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
