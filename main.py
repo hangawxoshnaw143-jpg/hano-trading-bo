@@ -19,6 +19,11 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INTERVAL_SECONDS = int(os.getenv("ANALYSIS_INTERVAL_SECONDS", "3600"))
 KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 
+RSS_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://www.federalreserve.gov/feeds/press_all.xml",
+]
+
 def get_candles(interval="1h", limit=120):
     # Use Kraken public candles because Binance returned HTTP 451 on Railway.
     minutes = {"1h": 60, "15m": 15, "4h": 240, "1d": 1440}.get(interval)
