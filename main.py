@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 
 import requests
 import feedparser
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -246,15 +246,104 @@ def analyze():
     )
 
 
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 سیگناڵ", callback_data="menu_signal"),
+            InlineKeyboardButton("🛡️ پلانی ڕیسک", callback_data="menu_risk"),
+        ],
+        [
+            InlineKeyboardButton("🧠 هۆکاری سیگناڵ", callback_data="menu_reason"),
+            InlineKeyboardButton("📰 هەواڵ و فەندامێنتاڵ", callback_data="menu_news"),
+        ],
+        [
+            InlineKeyboardButton("⏱️ تایمفریمەکان", callback_data="menu_timeframes"),
+            InlineKeyboardButton("📚 فێربوون", callback_data="menu_education"),
+        ],
+    ])
+
+
+def section_text(message, section):
+    lines = message.splitlines()
+
+    def after_heading(heading, stop_headings):
+        try:
+            start = next(i for i, line in enumerate(lines) if line.strip() == heading)
+        except StopIteration:
+            return ""
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() in stop_headings:
+                end = i
+                break
+        return "\n".join(lines[start:end]).strip()
+
+    if section == "menu_signal":
+        keep = [
+            line for line in lines
+            if line.startswith(("🤖 HANO BTC AI", "🕒 کەندڵی", "🆕 کاتی دروستکردنی",
+                                "💵 نرخی دوا", "🎯 ئەنجام:"))
+        ]
+        return "\n".join(keep) or "سیگناڵی ئێستا بەردەست نییە."
+    if section == "menu_risk":
+        risk = after_heading("🛡️ پلانی مامەڵە و ڕیسک",
+                             ["📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)"])
+        return risk or "زانیاریی پلانی ڕیسک بەردەست نییە."
+    if section == "menu_reason":
+        reason = next((line for line in lines if line.startswith("🧠 هۆکاری سەرەکی:")), "")
+        technical = after_heading("🔎 نیشانە تەکنیکییەکان", ["🛡️ پلانی مامەڵە و ڕیسک"])
+        return "\n".join(part for part in [reason, technical] if part) or "وردەکاریی هۆکاری سیگناڵ بەردەست نییە."
+    if section == "menu_news":
+        news = after_heading("📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)", ["━━━━━━━━━━━━━━━━━━"])
+        return ("📰 هەواڵ و فەندامێنتاڵ\n\n" + news
+                + "\n\nتێبینی: سەردێڕەکان زانیاریین و بەشێک لە فلتەری سیگناڵ نین.") if news else "ئێستا هەواڵ بەردەست نییە."
+    if section == "menu_timeframes":
+        return after_heading("📊 ئاراستەی تایمفریمەکان", ["🔎 نیشانە تەکنیکییەکان"]) or "زانیاریی تایمفریمەکان بەردەست نییە."
+    if section == "menu_education":
+        return (
+            "📚 فێربوون بە کوردی سۆرانی\n\n"
+            "• EMA20/EMA50: ناوەندی جوڵەی نرخ\n"
+            "• RSI: پێوانەی هێزی جوڵەی نرخ\n"
+            "• Market Structure: پێکهاتەی بازاڕ\n"
+            "• BOS/MSS: شکاندنی پێکهاتە / گۆڕانی پێکهاتە\n"
+            "• FVG: بۆشایی نرخی نێوان کەندڵەکان\n"
+            "• Support/Resistance: پشتگیری و بەرگری\n"
+            "• ATR: پێوانەی نوسانی نرخ\n\n"
+            "ئەم وشانە لێرەدا بۆ فێرکارییە؛ یاسای سیگناڵ ناگۆڕن."
+        )
+    return "بەخێربێیت بۆ HANO BTC AI."
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 بەخێربێیت بۆ HANO BTC AI\n"
-        "بازاڕ: BTC/USD لە Kraken\n\n"
-        "📊 /signal — شیکاری تەواوی بازاڕ\n"
-        "📖 /help — فەرمان و ڕوونکردنەوە\n\n"
-        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی: تەنها کاتێک ئاراستەی BUY/SELL پشتڕاست بێت و بگۆڕێت.\n"
-        "🛡️ بۆتەکە شیکاری دەکات، بەڵام هیچ مامەڵەیەک ناکات."
+        "🤖 HANO BTC AI\n"
+        "سیستەمی شیکاری Bitcoin — BTC/USD\n\n"
+        "بەشێک هەڵبژێرە بۆ بینینی زانیاریی تایبەت بەو بەشە.\n"
+        "بۆتەکە شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات.",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    section = query.data
+    if section == "menu_home":
+        await query.edit_message_text(
+            "🤖 HANO BTC AI\nسیستەمی شیکاری Bitcoin — BTC/USD\n\nبەشێک هەڵبژێرە:",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    try:
+        message = analyze()
+        body = section_text(message, section)
+    except Exception:
+        log.exception("menu analysis failed")
+        body = "⚠️ ئێستا نەتوانرا زانیاریی نوێ بهێنرێت. تکایە دواتر دووبارە هەوڵ بدە."
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ گەڕانەوە بۆ مێنیو", callback_data="menu_home")]
+    ])
+    await query.edit_message_text(body, reply_markup=keyboard)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,6 +407,7 @@ def main():
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_"))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("signal", signal))
     if CHAT_ID:
