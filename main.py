@@ -105,24 +105,63 @@ def atr(candles, period=14):
     return value
 
 
+def swing_points(candles, left=2, right=2):
+    """Return confirmed local swing highs/lows; right candles confirm a pivot."""
+    highs, lows = [], []
+    for i in range(left, len(candles) - right):
+        window = candles[i-left:i+right+1]
+        high, low = candles[i]["high"], candles[i]["low"]
+        if high == max(c["high"] for c in window) and sum(c["high"] == high for c in window) == 1:
+            highs.append((i, high))
+        if low == min(c["low"] for c in window) and sum(c["low"] == low for c in window) == 1:
+            lows.append((i, low))
+    return highs, lows
+
+
 def market_structure(candles, lookback=20):
     recent = candles[-(lookback + 1):-1]
     last = candles[-1]
     resistance = max(c["high"] for c in recent)
     support = min(c["low"] for c in recent)
+    highs, lows = swing_points(candles[-120:])
     if last["close"] > resistance:
         return "BULLISH BOS", support, resistance
     if last["close"] < support:
         return "BEARISH BOS", support, resistance
-    old = candles[-40:-20]
-    new = candles[-20:]
-    old_high, new_high = max(c["high"] for c in old), max(c["high"] for c in new)
-    old_low, new_low = min(c["low"] for c in old), min(c["low"] for c in new)
-    if new_high > old_high and new_low > old_low:
-        return "BULLISH STRUCTURE", support, resistance
-    if new_high < old_high and new_low < old_low:
-        return "BEARISH STRUCTURE", support, resistance
+    if len(highs) >= 2 and len(lows) >= 2:
+        if highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
+            return "BEARISH STRUCTURE", support, resistance
+        if highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
+            return "BULLISH STRUCTURE", support, resistance
     return "RANGE / NEUTRAL", support, resistance
+
+
+def pullback_rejection_confirmed(candles, direction, left=2, right=2):
+    """Require a confirmed LH/HL pullback followed by a continuation trigger."""
+    if len(candles) < 30:
+        return False
+    window = candles[-120:]
+    highs, lows = swing_points(window, left, right)
+    # Latest pivot must be confirmed by right completed candles; do not trade the pivot itself.
+    last_confirmable_index = len(window) - right - 1
+    if len(highs) < 2 or len(lows) < 2:
+        return False
+    last, prev = window[-1], window[-2]
+    if direction == "SELL":
+        previous_high, pullback_high = highs[-2], highs[-1]
+        if pullback_high[1] >= previous_high[1] or pullback_high[0] >= last_confirmable_index:
+            return False
+        if not any(previous_high[0] < low[0] < pullback_high[0] for low in lows):
+            return False
+        return last["close"] < last["open"] and last["close"] < prev["low"] and last["close"] < pullback_high[1]
+    if direction == "BUY":
+        previous_low, pullback_low = lows[-2], lows[-1]
+        if pullback_low[1] <= previous_low[1] or pullback_low[0] >= last_confirmable_index:
+            return False
+        if not any(previous_low[0] < high[0] < pullback_low[0] for high in highs):
+            return False
+        return last["close"] > last["open"] and last["close"] > prev["high"] and last["close"] > pullback_low[1]
+    return False
 
 
 def detect_fvg(candles):
@@ -201,11 +240,13 @@ def analyze():
         s4["trend"] == "BULLISH" and s1["trend"] == "BULLISH"
         and s15["trend"] == "BULLISH" and 50 <= s15["rsi"] <= 68
         and structure in ("BULLISH BOS", "BULLISH STRUCTURE")
+        and pullback_rejection_confirmed(m15, "BUY")
     )
     sell_ok = (
         s4["trend"] == "BEARISH" and s1["trend"] == "BEARISH"
         and s15["trend"] == "BEARISH" and 32 <= s15["rsi"] <= 50
         and structure in ("BEARISH BOS", "BEARISH STRUCTURE")
+        and pullback_rejection_confirmed(m15, "SELL")
     )
 
     direction, reason = "WAIT", "هاوتاییی تایمفریمەکان و پێکهاتەی بازاڕ تەواو نییە."
