@@ -320,7 +320,7 @@ def minimal_signal_message(message):
     target = read_price(r"Take Profit(?: \(TP\))?: USD ([0-9,]+\.[0-9]{2})")
 
     def price(value):
-        return "USD " + format(value, ",.2f") if value is not None else "N/A"
+        return format(value, ",.2f") if value is not None else "N/A"
 
     return (
         "📊 Hano Trading Bot — Bitcoin\\n"
