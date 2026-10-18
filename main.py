@@ -257,8 +257,12 @@ def timeframe_summary(candles):
     return {"trend": trend, "ema20": e20, "ema50": e50, "rsi": strength, "price": closes[-1]}
 
 
+TRANSLATION_CACHE = {}
+
 def translate_to_sorani(text):
-    """Translate a headline to Central Kurdish (Sorani); keep source text if unavailable."""
+    """Translate a headline to Central Kurdish (Sorani), caching results to avoid rate limits."""
+    if text in TRANSLATION_CACHE:
+        return TRANSLATION_CACHE[text]
     try:
         response = HTTP.get(
             "https://translate.googleapis.com/translate_a/single",
@@ -268,13 +272,20 @@ def translate_to_sorani(text):
         response.raise_for_status()
         payload = response.json()
         translated = "".join(part[0] for part in payload[0] if part and part[0])
-        return translated.strip() or text
+        result = translated.strip() or text
+        TRANSLATION_CACHE[text] = result
+        return result
     except Exception as exc:
         log.warning("Sorani headline translation unavailable: %s", exc)
+        TRANSLATION_CACHE[text] = text
         return text
 
 
+HEADLINES_CACHE = {"checked": 0.0, "items": []}
+
 def headlines(limit=5):
+    if time.monotonic() - HEADLINES_CACHE["checked"] < 300:
+        return list(HEADLINES_CACHE["items"][:limit])
     items = []
     for url in RSS_FEEDS:
         try:
@@ -287,7 +298,9 @@ def headlines(limit=5):
                     items.append(title)
         except Exception as exc:
             log.warning("RSS feed unavailable (%s): %s", url, exc)
-    return [(title, translate_to_sorani(title)) for title in items[:limit]]
+    translated_items = [(title, translate_to_sorani(title)) for title in items[:limit]]
+    HEADLINES_CACHE.update({"checked": time.monotonic(), "items": translated_items})
+    return list(translated_items)
 
 
 def money(value):
