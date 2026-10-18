@@ -323,11 +323,11 @@ def minimal_signal_message(message):
         return format(value, ",.2f") if value is not None else "N/A"
 
     return (
-        "📊 Hano Trading Bot — Bitcoin\\n"
-        "⏱️ Timeframe: M15\\n"
-        f"🚦 SIGNAL: {outcome}\\n"
-        f"💰 ENTRY: {price(entry)}\\n"
-        f"🎯 TP: {price(target)}\\n"
+        "📊 Hano Trading Bot — Bitcoin\n"
+        "⏱️ Timeframe: M15\n"
+        f"🚦 SIGNAL: {outcome}\n"
+        f"💰 ENTRY: {price(entry)}\n"
+        f"🎯 TP: {price(target)}\n"
         f"🛑 SL: {price(stop)}"
     )
 
