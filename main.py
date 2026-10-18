@@ -190,23 +190,21 @@ def analyze():
     h1 = get_candles("1h")
     m15 = get_candles("15m")
     s4, s1, s15 = timeframe_summary(h4), timeframe_summary(h1), timeframe_summary(m15)
-    price = s1["price"]
-    structure, support, resistance = market_structure(h1)
-    volatility = atr(h1)
-    volume_avg = sum(c["volume"] for c in h1[-21:-1]) / 20
-    volume_ratio = h1[-1]["volume"] / volume_avg if volume_avg > 0 else 0
+    price = s15["price"]
+    structure, support, resistance = market_structure(m15)
+    volatility = atr(m15)
+    volume_avg = sum(c["volume"] for c in m15[-21:-1]) / 20
+    volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg > 0 else 0
     fvg = detect_fvg(m15)
 
     buy_ok = (
         s4["trend"] == "BULLISH" and s1["trend"] == "BULLISH"
-        and 52 <= s1["rsi"] <= 68 and s15["trend"] != "BEARISH"
-        and s15["rsi"] >= 45
+        and s15["trend"] == "BULLISH" and 50 <= s15["rsi"] <= 68
         and structure in ("BULLISH BOS", "BULLISH STRUCTURE")
     )
     sell_ok = (
         s4["trend"] == "BEARISH" and s1["trend"] == "BEARISH"
-        and 32 <= s1["rsi"] <= 48 and s15["trend"] != "BULLISH"
-        and s15["rsi"] <= 55
+        and s15["trend"] == "BEARISH" and 32 <= s15["rsi"] <= 50
         and structure in ("BEARISH BOS", "BEARISH STRUCTURE")
     )
 
@@ -214,18 +212,18 @@ def analyze():
     entry = sl = tp = None
     if buy_ok:
         direction = "BUY"
-        reason = "H4 و H1 بەرەو سەرەوەن، RSI پشتگیری دەکات و پێکهاتەی بازاڕ بەرەو سەرەوەیە."
+        reason = "H4 و H1 و M15 هەموویان پشتگیریی BUY دەکەن و پێکهاتەی M15 بەرەو سەرەوەیە."
         entry = price
         sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
         tp = entry + 2.0 * (entry - sl)
     elif sell_ok:
         direction = "SELL"
-        reason = "H4 و H1 بەرەو خوارەوەن، RSI پشتگیری دەکات و پێکهاتەی بازاڕ بەرەو خوارەوەیە."
+        reason = "H4 و H1 و M15 هەموویان پشتگیریی SELL دەکەن و پێکهاتەی M15 بەرەو خوارەوەیە."
         entry = price
         sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
         tp = entry - 2.0 * (sl - entry)
 
-    candle_time = datetime.fromtimestamp(h1[-1]["time"], timezone.utc).strftime("%Y-%m-%d %H:%M")
+    candle_time = datetime.fromtimestamp(m15[-1]["time"], timezone.utc).strftime("%Y-%m-%d %H:%M")
     created_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     news = headlines()
     news_text = "\n".join(
@@ -235,7 +233,7 @@ def analyze():
     if entry is not None:
         risk_text = (
             "ئاراستەی پلان: " + direction + "\n"
-            "Entry (نرخی کەندڵی H1): " + money(entry) + "\n"
+            "Entry (نرخی کەندڵی M15): " + money(entry) + "\n"
             "Stop Loss (SL): " + money(sl) + "\nTake Profit (TP): " + money(tp) + "\n"
             "Risk/Reward ئامانج: 1:2 (خەمڵاندنی پلان، نەک دڵنیایی)"
         )
@@ -273,7 +271,7 @@ def analyze():
     return (
         "🤖 HANO BTC AI | BTC/USD • KRAKEN\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 کەندڵی H1 (UTC): {candle_time}\n"
+        f"🕒 کەندڵی M15 (UTC): {candle_time}\n"
         f"🆕 کاتی دروستکردنی شیکاری (UTC): {created_time}\n"
         f"💵 نرخی دوا کەندڵی تەواوبوو: {money(price)}\n\n"
         f"🎯 ئەنجام: {direction}\n"
@@ -287,8 +285,8 @@ def analyze():
         f"• Support: {money(support)}\n"
         f"• Resistance: {money(resistance)}\n"
         f"• FVG لە M15: {fvg}\n"
-        f"• Volumeی H1 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
-        f"• ATR(14) لە H1: {money(volatility)}\n\n"
+        f"• Volumeی M15 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
+        f"• ATR(14) لە M15: {money(volatility)}\n\n"
         "🛡️ پلانی مامەڵە و ڕیسک\n" + risk_text + "\n\n"
         "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)\n" + news_text + "\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -315,7 +313,7 @@ def minimal_signal_message(message):
         "",
     )
     outcome = outcome_line.split(":", 1)[1].strip() if ":" in outcome_line else "WAIT"
-    entry = read_price(r"Entry(?: \(نرخی کەندڵی H1\))?: USD ([0-9,]+\.[0-9]{2})")
+    entry = read_price(r"Entry(?: \(نرخی کەندڵی M15\))?: USD ([0-9,]+\.[0-9]{2})")
     stop = read_price(r"Stop Loss(?: \(SL\))?: USD ([0-9,]+\.[0-9]{2})")
     target = read_price(r"Take Profit(?: \(TP\))?: USD ([0-9,]+\.[0-9]{2})")
 
@@ -324,7 +322,7 @@ def minimal_signal_message(message):
 
     return (
         "📊 Hano Trading Bot — Bitcoin\n"
-        "⏱️ Timeframe: M15\n"
+        "⏱️ Timeframe: M15 — SCALPING\n"
         f"🚦 SIGNAL: {outcome}\n"
         f"💰 ENTRY: {price(entry)}\n"
         f"🎯 TP: {price(target)}\n"
@@ -467,7 +465,7 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
              for line in message.splitlines() if direction_marker in line),
             "WAIT",
         )
-        candle_marker = "🕒 کەندڵی H1 (UTC): "
+        candle_marker = "🕒 کەندڵی M15 (UTC): "
         candle_time = next(
             (line.split(candle_marker, 1)[1].strip()
              for line in message.splitlines() if candle_marker in line),
