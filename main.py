@@ -297,7 +297,8 @@ def analyze():
 
 
 def minimal_signal_message(message):
-    """Format only the /signal summary and trade-plan block; preserve other analysis sections."""
+    """Render /signal as six compact boxes, with the existing analysis retained below."""
+    import html
     import re
 
     def find_line(prefix):
@@ -318,54 +319,75 @@ def minimal_signal_message(message):
     plan_direction = plan_line.split(":", 1)[1].strip() if ":" in plan_line else ""
 
     entry = read_price(r"Entry(?: \(نرخی کەندڵی H1\))?: USD ([0-9,]+\.[0-9]{2})")
-    stop = read_price(r"Stop Loss \(SL\): USD ([0-9,]+\.[0-9]{2})")
-    target = read_price(r"Take Profit \(TP\): USD ([0-9,]+\.[0-9]{2})")
-
-    header = (
-        "🤖 HANO BTC AI\n"
-        "BTC/USD · KRAKEN · M15\n"
-        "جۆری مامەڵە: SCALPING\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        + outcome_line + "\n"
-    )
-
+    stop = read_price(r"Stop Loss(?: \(SL\))?: USD ([0-9,]+\.[0-9]{2})")
+    target = read_price(r"Take Profit(?: \(TP\))?: USD ([0-9,]+\.[0-9]{2})")
     if entry is None or stop is None or target is None:
-        # Keep the original response intact if expected prices cannot be parsed.
         return message
 
     tp_points = abs(target - entry)
     sl_points = abs(entry - stop)
-    # FxPro's published BTCUSD conditions list 1 lot as 1 BTC.
-    # Here, one price point means a $1 BTC price move; estimates exclude costs/slippage.
-    lots = (0.01, 0.10, 1.00)
-    compact_plan = (
-        ("⚠️ پلانی خەمڵێنراوە؛ سیگناڵ هەر WAIT ـە.\n" if outcome == "WAIT" else "")
-        + (f"ئاراستەی پلان: {plan_direction}\n" if plan_direction else "")
-        + f"Entry: {money(entry)}\n"
-        + f"SL: {money(stop)}\n"
-        + f"TP: {money(target)}\n"
-        + f"📏 مەودای TP: {tp_points:,.2f} Points\n"
-        + f"🛡️ مەودای SL: {sl_points:,.2f} Points\n"
-        + "💰 قازانج/زیانی خەمڵێنراو بە لۆت:\n"
-        + "".join(
-            f"• {lot:.2f} Lot — TP: +USD {tp_points * lot:,.2f} | SL: -USD {sl_points * lot:,.2f}\n"
-            for lot in lots
-        )
-        + "تێبینی: 1 Point = جوڵەی $1 لە نرخی BTC؛ حسابەکان بەپێی 1 Lot = 1 BTC ـن و سپرێد/کۆمسیۆن/سلپیج لەخۆ ناگرن.\n"
-    )
 
-    reason_heading = "🧠 هۆکاری سەرەکی:"
-    risk_heading = "🛡️ پلانی مامەڵە و ڕیسک\n"
-    news_heading = "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)"
-    reason_pos = message.find(reason_heading)
-    risk_pos = message.find(risk_heading, reason_pos if reason_pos >= 0 else 0)
-    news_pos = message.find(news_heading, risk_pos if risk_pos >= 0 else 0)
-    if reason_pos < 0 or risk_pos < 0 or news_pos < 0:
-        return message
+    # Keep each card short enough for a two-column Telegram monospace grid.
+    width = 18
+    def card(title, lines):
+        inner = width - 2
+        content = [title] + lines
+        content = [line[:inner].ljust(inner) for line in content[:3]]
+        while len(content) < 3:
+            content.append(" " * inner)
+        return ["┌" + "─" * inner + "┐"] + ["│" + line + "│" for line in content] + ["└" + "─" * inner + "┘"]
 
-    preserved_analysis = message[reason_pos:risk_pos]
-    preserved_news_and_footer = message[news_pos:]
-    return header + "\n" + preserved_analysis + risk_heading + compact_plan + "\n" + preserved_news_and_footer
+    lots_text = [f"0.01 Lot: +{tp_points * 0.01:.2f}/-{sl_points * 0.01:.2f}",
+                 f"0.10 Lot: +{tp_points * 0.10:.2f}/-{sl_points * 0.10:.2f}"]
+    cards = [
+        card("🎯 " + outcome, [("پلان: " + plan_direction) if plan_direction else "BTC/USD · M15", "HANO BTC AI"]),
+        card("💰 ENTRY", [f"{entry:,.2f} USD", "نرخی چوونەژوورەوە"]),
+        card("🛑 STOP LOSS", [f"{stop:,.2f} USD", f"{sl_points:,.2f} Points"]),
+        card("🏁 TAKE PROFIT", [f"{target:,.2f} USD", f"{tp_points:,.2f} Points"]),
+        card("📏 مەودا", [f"TP: {tp_points:,.2f} pts", f"SL: {sl_points:,.2f} pts"]),
+        card("⚖️ Lot / TP-SL", lots_text),
+    ]
+    grid_lines = []
+    for row in range(3):
+        left, right = cards[row * 2], cards[row * 2 + 1]
+        grid_lines.extend(a + "  " + b for a, b in zip(left, right))
+    grid = "🤖 HANO BTC AI · BTC/USD\n" + "\n".join(grid_lines)
+    grid += "\n\n" + f"1.00 Lot: TP +USD {tp_points:,.2f} | SL -USD {sl_points:,.2f}"
+    grid += "\n" + "هەژمارەکان گریمانەن؛ پێویستە Contract Size ـی BTCUSD لە MT5 پشتڕاست بکرێتەوە."
+
+    # Preserve the bot's reason, timeframe/technical context, headlines and safety footer.
+    lines = message.splitlines()
+    reason_start = next((i for i, line in enumerate(lines) if line.startswith("🧠 هۆکاری سەرەکی:")), None)
+    time_start = next((i for i, line in enumerate(lines) if line.startswith("📊 ئاراستەی تایمفریمەکان") or line.startswith("📊 MULTI-TIMEFRAME")), None)
+    news_start = next((i for i, line in enumerate(lines) if line.startswith("📰 هەواڵ") or line.startswith("📰 هەواڵ و فەندامێنتاڵ")), None)
+    footer_start = next((i for i, line in enumerate(lines) if line.startswith("⚠️ تەنها شیکارییە") or line.startswith("⚠️ تەنها شیکاری")), None)
+
+    extras = []
+    if reason_start is not None:
+        reason_end = time_start if time_start is not None else len(lines)
+        reason = "\n".join(lines[reason_start:reason_end]).strip()
+        if reason:
+            extras.append(reason)
+    if time_start is not None:
+        time_end_candidates = [i for i in (news_start, footer_start) if i is not None and i > time_start]
+        time_end = min(time_end_candidates) if time_end_candidates else len(lines)
+        timeframe = "\n".join(lines[time_start:time_end]).strip()
+        if timeframe:
+            extras.append(timeframe)
+    if news_start is not None:
+        news_end = footer_start if footer_start is not None and footer_start > news_start else len(lines)
+        news = "\n".join(lines[news_start:news_end]).strip()
+        if news:
+            extras.append(news)
+    if footer_start is not None:
+        footer = "\n".join(lines[footer_start:]).strip()
+        if footer:
+            extras.append(footer)
+
+    result = "<pre>" + html.escape(grid) + "</pre>"
+    if extras:
+        result += "\n\n" + html.escape("\n\n".join(extras))
+    return result
 
 
 def main_menu_keyboard():
@@ -488,7 +510,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = analyze()
-        await update.message.reply_text(minimal_signal_message(message))
+        await update.message.reply_text(minimal_signal_message(message), parse_mode="HTML")
     except Exception:
         log.exception("analysis failed")
         await update.message.reply_text(
