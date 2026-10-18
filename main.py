@@ -407,11 +407,11 @@ def analyze():
         f"🆕 کاتی دروستکردنی شیکاری (UTC): {created_time}\n"
         f"💵 نرخی دوا کەندڵی تەواوبوو: {money(price)}\n\n"
         f"🎯 ئەنجام: {direction}\n"
-        f"🧠 هۆکاری سەرەکی: {reason}\\n"
-        f"📰 فلتەری هەواڵ: {fundamental_status}\\n"
-        + ("\\n".join("⚠️ هەواڵی ماکرۆ: " + title for title in impact_headlines) + "\\n" if impact_headlines else "")
-        + "\\n"
-        "📊 ئاراستەی تایمفریمەکان\\n"
+        f"🧠 هۆکاری سەرەکی: {reason}\n"
+        f"📰 فلتەری هەواڵ: {fundamental_status}\n"
+        + ("\n".join("⚠️ هەواڵی ماکرۆ: " + title for title in impact_headlines) + "\n" if impact_headlines else "")
+        + "\n"
+        "📊 ئاراستەی تایمفریمەکان\n"
         f"• H4: {s4['trend']} | EMA20: {money(s4['ema20'])} | EMA50: {money(s4['ema50'])}\n"
         f"• H1: {s1['trend']} | EMA20: {money(s1['ema20'])} | EMA50: {money(s1['ema50'])} | RSI: {s1['rsi']:.1f}\n"
         f"• M15: {s15['trend']} | RSI: {s15['rsi']:.1f}\n\n"
