@@ -300,10 +300,10 @@ def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📊 سیگناڵ", callback_data="menu_signal"),
-            InlineKeyboardButton("🛡️ پلانی ڕیسک", callback_data="menu_risk"),
+            InlineKeyboardButton("🧠 هۆکاری سیگناڵ", callback_data="menu_reason"),
         ],
         [
-            InlineKeyboardButton("🧠 هۆکاری سیگناڵ", callback_data="menu_reason"),
+            InlineKeyboardButton("🛡️ پلانی ڕیسک", callback_data="menu_risk"),
             InlineKeyboardButton("📰 هەواڵ و فەندامێنتاڵ", callback_data="menu_news"),
         ],
         [
@@ -336,15 +336,20 @@ def section_text(message, section):
         ]
         return "\n".join(keep) or "سیگناڵی ئێستا بەردەست نییە."
     if section == "menu_risk":
-        risk = after_heading("🛡️ پلانی مامەڵە و ڕیسک",
-                             ["📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)"])
+        risk = after_heading(
+            "🛡️ پلانی مامەڵە و ڕیسک",
+            ["📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)"],
+        )
         return risk or "زانیاریی پلانی ڕیسک بەردەست نییە."
     if section == "menu_reason":
         reason = next((line for line in lines if line.startswith("🧠 هۆکاری سەرەکی:")), "")
         technical = after_heading("🔎 نیشانە تەکنیکییەکان", ["🛡️ پلانی مامەڵە و ڕیسک"])
         return "\n".join(part for part in [reason, technical] if part) or "وردەکاریی هۆکاری سیگناڵ بەردەست نییە."
     if section == "menu_news":
-        news = after_heading("📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)", ["━━━━━━━━━━━━━━━━━━"])
+        news = after_heading(
+            "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)",
+            ["━━━━━━━━━━━━━━━━━━"],
+        )
         return ("📰 هەواڵ و فەندامێنتاڵ\n\n" + news
                 + "\n\nتێبینی: سەردێڕەکان زانیاریین و بەشێک لە فلتەری سیگناڵ نین.") if news else "ئێستا هەواڵ بەردەست نییە."
     if section == "menu_timeframes":
