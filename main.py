@@ -150,6 +150,23 @@ def timeframe_summary(candles):
     return {"trend": trend, "ema20": e20, "ema50": e50, "rsi": strength, "price": closes[-1]}
 
 
+def translate_to_sorani(text):
+    """Translate a headline to Central Kurdish (Sorani); keep source text if unavailable."""
+    try:
+        response = HTTP.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "ckb", "dt": "t", "q": text},
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        translated = "".join(part[0] for part in payload[0] if part and part[0])
+        return translated.strip() or text
+    except Exception as exc:
+        log.warning("Sorani headline translation unavailable: %s", exc)
+        return text
+
+
 def headlines(limit=5):
     items = []
     for url in RSS_FEEDS:
@@ -161,7 +178,7 @@ def headlines(limit=5):
                     items.append(title)
         except Exception as exc:
             log.warning("RSS feed unavailable (%s): %s", url, exc)
-    return items[:limit]
+    return [(title, translate_to_sorani(title)) for title in items[:limit]]
 
 
 def money(value):
@@ -211,7 +228,10 @@ def analyze():
     candle_time = datetime.fromtimestamp(h1[-1]["time"], timezone.utc).strftime("%Y-%m-%d %H:%M")
     created_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     news = headlines()
-    news_text = "\n".join("• " + item for item in news) if news else "هەواڵی RSS بەردەست نییە."
+    news_text = "\n".join(
+        "• " + translated + ("\n  (Original: " + original + ")" if translated == original else "")
+        for original, translated in news
+    ) if news else "هەواڵی RSS بەردەست نییە."
     if entry is not None:
         risk_text = (
             "ئاراستەی پلان: " + direction + "\n"
@@ -270,7 +290,7 @@ def analyze():
         f"• Volumeی H1 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
         f"• ATR(14) لە H1: {money(volatility)}\n\n"
         "🛡️ پلانی مامەڵە و ڕیسک\n" + risk_text + "\n\n"
-        "📰 سەردێڕی هەواڵ (زانیارییە، نەک فلتەری سیگناڵ)\n" + news_text + "\n\n"
+        "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)\n" + news_text + "\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚠️ تەنها شیکارییە؛ بۆتەکە مامەڵە ناکات. Entry/SL/TP خەمڵاندنی پلاندانانە و دڵنیایی نییە. پێش بەکارهێنان لە Demo تاقی بکەرەوە."
     )
