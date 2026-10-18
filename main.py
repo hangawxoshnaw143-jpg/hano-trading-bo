@@ -297,12 +297,8 @@ def analyze():
 
 
 def minimal_signal_message(message):
-    """Render /signal as six compact boxes, with the existing analysis retained below."""
-    import html
+    """Return only the six requested signal lines."""
     import re
-
-    def find_line(prefix):
-        return next((line for line in message.splitlines() if line.startswith(prefix)), "")
 
     def read_price(pattern):
         match = re.search(pattern, message)
@@ -313,81 +309,27 @@ def minimal_signal_message(message):
         except (TypeError, ValueError):
             return None
 
-    outcome_line = find_line("🎯 ئەنجام:")
+    outcome_line = next(
+        (line for line in message.splitlines()
+         if line.startswith("🎯 ئەنجام:") or line.startswith("🚦 SIGNAL:")),
+        "",
+    )
     outcome = outcome_line.split(":", 1)[1].strip() if ":" in outcome_line else "WAIT"
-    plan_line = find_line("ئاراستەی پلان:")
-    plan_direction = plan_line.split(":", 1)[1].strip() if ":" in plan_line else ""
-
     entry = read_price(r"Entry(?: \(نرخی کەندڵی H1\))?: USD ([0-9,]+\.[0-9]{2})")
     stop = read_price(r"Stop Loss(?: \(SL\))?: USD ([0-9,]+\.[0-9]{2})")
     target = read_price(r"Take Profit(?: \(TP\))?: USD ([0-9,]+\.[0-9]{2})")
-    if entry is None or stop is None or target is None:
-        return message
 
-    tp_points = abs(target - entry)
-    sl_points = abs(entry - stop)
+    def price(value):
+        return "USD " + format(value, ",.2f") if value is not None else "N/A"
 
-    # Keep each card short enough for a two-column Telegram monospace grid.
-    width = 18
-    def card(title, lines):
-        inner = width - 2
-        content = [title] + lines
-        content = [line[:inner].ljust(inner) for line in content[:3]]
-        while len(content) < 3:
-            content.append(" " * inner)
-        return ["┌" + "─" * inner + "┐"] + ["│" + line + "│" for line in content] + ["└" + "─" * inner + "┘"]
-
-    lots_text = [f"0.01 Lot: +{tp_points * 0.01:.2f}/-{sl_points * 0.01:.2f}",
-                 f"0.10 Lot: +{tp_points * 0.10:.2f}/-{sl_points * 0.10:.2f}"]
-    cards = [
-        card("🎯 " + outcome, [("پلان: " + plan_direction) if plan_direction else "BTC/USD · M15", "HANO BTC AI"]),
-        card("💰 ENTRY", [f"{entry:,.2f} USD", "نرخی چوونەژوورەوە"]),
-        card("🛑 STOP LOSS", [f"{stop:,.2f} USD", f"{sl_points:,.2f} Points"]),
-        card("🏁 TAKE PROFIT", [f"{target:,.2f} USD", f"{tp_points:,.2f} Points"]),
-        card("📏 مەودا", [f"TP: {tp_points:,.2f} pts", f"SL: {sl_points:,.2f} pts"]),
-        card("⚖️ Lot / TP-SL", lots_text),
-    ]
-    grid_lines = []
-    for row in range(3):
-        left, right = cards[row * 2], cards[row * 2 + 1]
-        grid_lines.extend(a + "  " + b for a, b in zip(left, right))
-    grid = "🤖 HANO BTC AI · BTC/USD\n" + "\n".join(grid_lines)
-    grid += "\n\n" + f"1.00 Lot: TP +USD {tp_points:,.2f} | SL -USD {sl_points:,.2f}"
-    grid += "\n" + "هەژمارەکان گریمانەن؛ پێویستە Contract Size ـی BTCUSD لە MT5 پشتڕاست بکرێتەوە."
-
-    # Preserve the bot's reason, timeframe/technical context, headlines and safety footer.
-    lines = message.splitlines()
-    reason_start = next((i for i, line in enumerate(lines) if line.startswith("🧠 هۆکاری سەرەکی:")), None)
-    time_start = next((i for i, line in enumerate(lines) if line.startswith("📊 ئاراستەی تایمفریمەکان") or line.startswith("📊 MULTI-TIMEFRAME")), None)
-    news_start = next((i for i, line in enumerate(lines) if line.startswith("📰 هەواڵ") or line.startswith("📰 هەواڵ و فەندامێنتاڵ")), None)
-    footer_start = next((i for i, line in enumerate(lines) if line.startswith("⚠️ تەنها شیکارییە") or line.startswith("⚠️ تەنها شیکاری")), None)
-
-    extras = []
-    if reason_start is not None:
-        reason_end = time_start if time_start is not None else len(lines)
-        reason = "\n".join(lines[reason_start:reason_end]).strip()
-        if reason:
-            extras.append(reason)
-    if time_start is not None:
-        time_end_candidates = [i for i in (news_start, footer_start) if i is not None and i > time_start]
-        time_end = min(time_end_candidates) if time_end_candidates else len(lines)
-        timeframe = "\n".join(lines[time_start:time_end]).strip()
-        if timeframe:
-            extras.append(timeframe)
-    if news_start is not None:
-        news_end = footer_start if footer_start is not None and footer_start > news_start else len(lines)
-        news = "\n".join(lines[news_start:news_end]).strip()
-        if news:
-            extras.append(news)
-    if footer_start is not None:
-        footer = "\n".join(lines[footer_start:]).strip()
-        if footer:
-            extras.append(footer)
-
-    result = "<pre>" + html.escape(grid) + "</pre>"
-    if extras:
-        result += "\n\n" + html.escape("\n\n".join(extras))
-    return result
+    return (
+        "📊 Hano Trading Bot — Bitcoin\\n"
+        "⏱️ Timeframe: M15\\n"
+        f"🚦 SIGNAL: {outcome}\\n"
+        f"💰 ENTRY: {price(entry)}\\n"
+        f"🎯 TP: {price(target)}\\n"
+        f"🛑 SL: {price(stop)}"
+    )
 
 
 def main_menu_keyboard():
@@ -423,12 +365,7 @@ def section_text(message, section):
         return "\n".join(lines[start:end]).strip()
 
     if section == "menu_signal":
-        keep = [
-            line for line in lines
-            if line.startswith(("🤖 HANO BTC AI", "🕒 کەندڵی", "🆕 کاتی دروستکردنی",
-                                "💵 نرخی دوا", "🎯 ئەنجام:"))
-        ]
-        return "\n".join(keep) or "سیگناڵی ئێستا بەردەست نییە."
+        return minimal_signal_message(message)
     if section == "menu_risk":
         risk = after_heading(
             "🛡️ پلانی مامەڵە و ڕیسک",
@@ -546,7 +483,7 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
         previous_candle = previous_key.rsplit(":", 1)[0]
         if candle_time and candle_time != previous_candle:
             if direction in ("BUY", "SELL") and direction != previous_direction:
-                await context.bot.send_message(chat_id=CHAT_ID, text=message)
+                await context.bot.send_message(chat_id=CHAT_ID, text=minimal_signal_message(message))
             context.application.bot_data["last_alert_key"] = current_key
     except Exception:
         log.exception("signal watch failed")
