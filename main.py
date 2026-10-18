@@ -296,6 +296,78 @@ def analyze():
     )
 
 
+def minimal_signal_message(message):
+    """Format only the /signal summary and trade-plan block; preserve other analysis sections."""
+    import re
+
+    def find_line(prefix):
+        return next((line for line in message.splitlines() if line.startswith(prefix)), "")
+
+    def read_price(pattern):
+        match = re.search(pattern, message)
+        if not match:
+            return None
+        try:
+            return float(match.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    outcome_line = find_line("🎯 ئەنجام:")
+    outcome = outcome_line.split(":", 1)[1].strip() if ":" in outcome_line else "WAIT"
+    plan_line = find_line("ئاراستەی پلان:")
+    plan_direction = plan_line.split(":", 1)[1].strip() if ":" in plan_line else ""
+
+    entry = read_price(r"Entry(?: \(نرخی کەندڵی H1\))?: USD ([0-9,]+\.[0-9]{2})")
+    stop = read_price(r"Stop Loss \(SL\): USD ([0-9,]+\.[0-9]{2})")
+    target = read_price(r"Take Profit \(TP\): USD ([0-9,]+\.[0-9]{2})")
+
+    header = (
+        "🤖 HANO BTC AI\n"
+        "BTC/USD · KRAKEN · M15\n"
+        "جۆری مامەڵە: SCALPING\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + outcome_line + "\n"
+    )
+
+    if entry is None or stop is None or target is None:
+        # Keep the original response intact if expected prices cannot be parsed.
+        return message
+
+    tp_points = abs(target - entry)
+    sl_points = abs(entry - stop)
+    # FxPro's published BTCUSD conditions list 1 lot as 1 BTC.
+    # Here, one price point means a $1 BTC price move; estimates exclude costs/slippage.
+    lots = (0.01, 0.10, 1.00)
+    compact_plan = (
+        ("⚠️ پلانی خەمڵێنراوە؛ سیگناڵ هەر WAIT ـە.\n" if outcome == "WAIT" else "")
+        + (f"ئاراستەی پلان: {plan_direction}\n" if plan_direction else "")
+        + f"Entry: {money(entry)}\n"
+        + f"SL: {money(stop)}\n"
+        + f"TP: {money(target)}\n"
+        + f"📏 مەودای TP: {tp_points:,.2f} Points\n"
+        + f"🛡️ مەودای SL: {sl_points:,.2f} Points\n"
+        + "💰 قازانج/زیانی خەمڵێنراو بە لۆت:\n"
+        + "".join(
+            f"• {lot:.2f} Lot — TP: +USD {tp_points * lot:,.2f} | SL: -USD {sl_points * lot:,.2f}\n"
+            for lot in lots
+        )
+        + "تێبینی: 1 Point = جوڵەی $1 لە نرخی BTC؛ حسابەکان بەپێی 1 Lot = 1 BTC ـن و سپرێد/کۆمسیۆن/سلپیج لەخۆ ناگرن.\n"
+    )
+
+    reason_heading = "🧠 هۆکاری سەرەکی:"
+    risk_heading = "🛡️ پلانی مامەڵە و ڕیسک\n"
+    news_heading = "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)"
+    reason_pos = message.find(reason_heading)
+    risk_pos = message.find(risk_heading, reason_pos if reason_pos >= 0 else 0)
+    news_pos = message.find(news_heading, risk_pos if risk_pos >= 0 else 0)
+    if reason_pos < 0 or risk_pos < 0 or news_pos < 0:
+        return message
+
+    preserved_analysis = message[reason_pos:risk_pos]
+    preserved_news_and_footer = message[news_pos:]
+    return header + "\n" + preserved_analysis + risk_heading + compact_plan + "\n" + preserved_news_and_footer
+
+
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -415,7 +487,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await update.message.reply_text(analyze())
+        message = analyze()
+        await update.message.reply_text(minimal_signal_message(message))
     except Exception:
         log.exception("analysis failed")
         await update.message.reply_text(
