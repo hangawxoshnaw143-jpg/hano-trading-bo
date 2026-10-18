@@ -214,12 +214,42 @@ def analyze():
     news_text = "\n".join("• " + item for item in news) if news else "هەواڵی RSS بەردەست نییە."
     if entry is not None:
         risk_text = (
+            "ئاراستەی پلان: " + direction + "\n"
             "Entry (نرخی کەندڵی H1): " + money(entry) + "\n"
-            "Stop Loss: " + money(sl) + "\nTake Profit: " + money(tp) + "\n"
+            "Stop Loss (SL): " + money(sl) + "\nTake Profit (TP): " + money(tp) + "\n"
             "Risk/Reward ئامانج: 1:2 (خەمڵاندنی پلان، نەک دڵنیایی)"
         )
     else:
-        risk_text = "Entry/SL/TP: دیاری نەکراوە؛ مەرجەکانی سیگناڵ تەواو نین."
+        # Always show an indicative plan, without changing WAIT into a trade signal.
+        if (s4["trend"] == "BEARISH" and s1["trend"] == "BEARISH") or structure.startswith("BEARISH"):
+            plan_direction = "SELL"
+            plan_entry = price
+            plan_sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
+            plan_tp = plan_entry - 2.0 * (plan_sl - plan_entry)
+        elif (s4["trend"] == "BULLISH" and s1["trend"] == "BULLISH") or structure.startswith("BULLISH"):
+            plan_direction = "BUY"
+            plan_entry = price
+            plan_sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
+            plan_tp = plan_entry + 2.0 * (plan_entry - plan_sl)
+        elif price >= (support + resistance) / 2:
+            plan_direction = "SELL"
+            plan_entry = price
+            plan_sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
+            plan_tp = plan_entry - 2.0 * (plan_sl - plan_entry)
+        else:
+            plan_direction = "BUY"
+            plan_entry = price
+            plan_sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
+            plan_tp = plan_entry + 2.0 * (plan_entry - plan_sl)
+        risk_text = (
+            "⚠️ پلانی خەمڵێنراو بۆ چاودێری (سیگناڵی چالاک نییە)\n"
+            "ئاراستەی پلان: " + plan_direction + "\n"
+            "Entry: " + money(plan_entry) + "\n"
+            "Stop Loss (SL): " + money(plan_sl) + "\n"
+            "Take Profit (TP): " + money(plan_tp) + "\n"
+            "Risk/Reward ئامانج: 1:2\n"
+            "تێبینی: ئەنجام هەر WAIT ـە؛ تا سیگناڵ پشتڕاست نەبێتەوە مامەڵە مەکەرەوە."
+        )
     return (
         "🤖 HANO BTC AI | BTC/USD • KRAKEN\n"
         "━━━━━━━━━━━━━━━━━━\n"
