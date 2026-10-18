@@ -2,6 +2,71 @@ import os
 import logging
 from datetime import datetime, timezone
 
+import time
+
+NEWS_GUARD_FEEDS = [
+    "https://www.federalreserve.gov/feeds/press_all.xml",
+    "https://www.bls.gov/feed/cpi.rss",
+    "https://www.bls.gov/feed/empsit.rss",
+    "https://www.bls.gov/feed/bls_latest.rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+]
+NEWS_CACHE_SECONDS = 300
+NEWS_EVENT_WINDOW_MINUTES = 90
+_NEWS_CACHE = {"checked": 0.0, "allowed": False, "status": "News not checked", "items": []}
+_NEWS_TERMS = (
+    "fomc", "federal reserve", "fed rate", "interest rate decision", "rate decision",
+    "consumer price index", "cpi", "inflation", "nonfarm payroll", "payrolls",
+    "employment situation", "unemployment rate", "jobs report", "personal consumption expenditures",
+    "pce price", "gross domestic product", "gdp", "powell", "monetary policy",
+)
+
+def fundamental_news_guard():
+    """Conservative event-risk guard; checks recent headlines, not macro surprise or sentiment."""
+    now_mono = time.monotonic()
+    if now_mono - _NEWS_CACHE["checked"] < NEWS_CACHE_SECONDS:
+        return _NEWS_CACHE["allowed"], _NEWS_CACHE["status"], list(_NEWS_CACHE["items"])
+    now = datetime.now(timezone.utc)
+    recent = []
+    sources_ok = 0
+    seen = set()
+    for url in NEWS_GUARD_FEEDS:
+        try:
+            response = HTTP.get(url, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+            parsed = feedparser.parse(response.content)
+            if getattr(parsed, "bozo", False) and not parsed.entries:
+                continue
+            sources_ok += 1
+            for entry in parsed.entries[:15]:
+                title = str(getattr(entry, "title", "") or "").strip()
+                if not title or title.casefold() in seen:
+                    continue
+                seen.add(title.casefold())
+                if not any(term in title.casefold() for term in _NEWS_TERMS):
+                    continue
+                published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+                if not published:
+                    continue
+                try:
+                    published_at = datetime(*published[:6], tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                age = (now - published_at).total_seconds()
+                if -300 <= age <= NEWS_EVENT_WINDOW_MINUTES * 60:
+                    recent.append(title)
+        except Exception as exc:
+            log.warning("Fundamental RSS feed unavailable (%s): %s", url, exc)
+    if sources_ok == 0:
+        allowed, status = False, "BLOCKED: all fundamental-news sources unavailable"
+    elif recent:
+        allowed, status = False, "BLOCKED: recent high-impact USD/macro headline; wait for volatility to settle"
+    else:
+        allowed, status = True, "CLEAR: RSS sources reachable; no matching high-impact headline in the last 90 minutes"
+    _NEWS_CACHE.update({"checked": now_mono, "allowed": allowed, "status": status, "items": recent[:5]})
+    return allowed, status, list(recent[:5])
+
+
 import requests
 import feedparser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,6 +84,9 @@ KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://www.federalreserve.gov/feeds/press_all.xml",
+    "https://www.bls.gov/feed/cpi.rss",
+    "https://www.bls.gov/feed/empsit.rss",
+    "https://www.bls.gov/feed/bls_latest.rss",
 ]
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "HANO-BTC-AI/2.0"})
@@ -210,7 +278,9 @@ def headlines(limit=5):
     items = []
     for url in RSS_FEEDS:
         try:
-            parsed = feedparser.parse(url)
+            response = HTTP.get(url, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+            parsed = feedparser.parse(response.content)
             for entry in parsed.entries[:4]:
                 title = getattr(entry, "title", "").strip()
                 if title and title not in items:
@@ -249,7 +319,15 @@ def analyze():
         and pullback_rejection_confirmed(m15, "SELL")
     )
 
-    direction, reason = "WAIT", "هاوتاییی تایمفریمەکان و پێکهاتەی بازاڕ تەواو نییە."
+    fundamental_ok, fundamental_status, impact_headlines = fundamental_news_guard()
+    if not fundamental_ok:
+        buy_ok = False
+        sell_ok = False
+
+    direction, reason = "WAIT", (
+        fundamental_status if not fundamental_ok
+        else "هاوتاییی تایمفریمەکان و پێکهاتەی بازاڕ تەواو نییە."
+    )
     entry = sl = tp = None
     if buy_ok:
         direction = "BUY"
@@ -329,7 +407,7 @@ def analyze():
         f"• Volumeی M15 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
         f"• ATR(14) لە M15: {money(volatility)}\n\n"
         "🛡️ پلانی مامەڵە و ڕیسک\n" + risk_text + "\n\n"
-        "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)\n" + news_text + "\n\n"
+        "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)\n" + news_text + "\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚠️ تەنها شیکارییە؛ بۆتەکە مامەڵە ناکات. Entry/SL/TP خەمڵاندنی پلاندانانە و دڵنیایی نییە. پێش بەکارهێنان لە Demo تاقی بکەرەوە."
     )
