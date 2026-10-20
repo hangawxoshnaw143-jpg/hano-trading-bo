@@ -58,7 +58,9 @@ def fundamental_news_guard():
         except Exception as exc:
             log.warning("Fundamental RSS feed unavailable (%s): %s", url, exc)
     if sources_ok == 0:
-        allowed, status = False, "BLOCKED: all fundamental-news sources unavailable"
+        # Do not silently suppress every technical signal just because an RSS provider is down.
+        # Make the missing news verification explicit so the user can choose whether to trade.
+        allowed, status = True, "WARNING: fundamental-news feeds unavailable; signal is technical-only"
     elif recent:
         allowed, status = False, "BLOCKED: recent high-impact USD/macro headline; wait for volatility to settle"
     else:
@@ -319,18 +321,49 @@ def analyze():
     volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg > 0 else 0
     fvg = detect_fvg(m15)
 
-    buy_ok = (
-        s4["trend"] == "BULLISH" and s1["trend"] == "BULLISH"
-        and s15["trend"] == "BULLISH" and 50 <= s15["rsi"] <= 68
-        and structure in ("BULLISH BOS", "BULLISH STRUCTURE")
-        and pullback_rejection_confirmed(m15, "BUY")
-    )
-    sell_ok = (
-        s4["trend"] == "BEARISH" and s1["trend"] == "BEARISH"
-        and s15["trend"] == "BEARISH" and 32 <= s15["rsi"] <= 50
-        and structure in ("BEARISH BOS", "BEARISH STRUCTURE")
-        and pullback_rejection_confirmed(m15, "SELL")
-    )
+    # Weighted confirmation model: higher timeframes guide direction, but do not all
+    # have to align. Pullback rejection is supportive evidence, not a mandatory gate.
+    buy_score = 0
+    sell_score = 0
+
+    for summary, weight in ((s4, 1), (s1, 2), (s15, 2)):
+        if summary["trend"] == "BULLISH":
+            buy_score += weight
+        elif summary["trend"] == "BEARISH":
+            sell_score += weight
+
+    if 45 <= s15["rsi"] <= 72:
+        buy_score += 1
+    elif s15["rsi"] < 35 or s15["rsi"] > 78:
+        buy_score -= 1
+    if 28 <= s15["rsi"] <= 55:
+        sell_score += 1
+    elif s15["rsi"] < 22 or s15["rsi"] > 65:
+        sell_score -= 1
+
+    if structure in ("BULLISH BOS", "BULLISH STRUCTURE"):
+        buy_score += 2
+    elif structure in ("BEARISH BOS", "BEARISH STRUCTURE"):
+        sell_score += 2
+
+    if pullback_rejection_confirmed(m15, "BUY"):
+        buy_score += 1
+    if pullback_rejection_confirmed(m15, "SELL"):
+        sell_score += 1
+    if fvg.startswith("BULLISH FVG"):
+        buy_score += 1
+    elif fvg.startswith("BEARISH FVG"):
+        sell_score += 1
+    if volume_ratio >= 1.10:
+        if m15[-1]["close"] > m15[-1]["open"]:
+            buy_score += 1
+        elif m15[-1]["close"] < m15[-1]["open"]:
+            sell_score += 1
+
+    # Require a meaningful score and separation from the opposing side to avoid
+    # treating a mixed/ranging market as a confirmed entry.
+    buy_ok = buy_score >= 5 and buy_score >= sell_score + 2
+    sell_ok = sell_score >= 5 and sell_score >= buy_score + 2
 
     fundamental_ok, fundamental_status, impact_headlines = fundamental_news_guard()
     if not fundamental_ok:
@@ -339,7 +372,7 @@ def analyze():
 
     direction, reason = "WAIT", (
         fundamental_status if not fundamental_ok
-        else "هاوتاییی تایمفریمەکان و پێکهاتەی بازاڕ تەواو نییە."
+        else f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}؛ نمرەی پێویست 5 و جیاوازی لانیکەم 2 ـە."
     )
     entry = sl = tp = None
     if buy_ok:
@@ -615,8 +648,14 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
         previous_direction = previous_key.rsplit(":", 1)[-1]
         previous_candle = previous_key.rsplit(":", 1)[0]
         if candle_time and candle_time != previous_candle:
-            if direction in ("BUY", "SELL") and direction != previous_direction:
+            # Alert on each newly completed M15 candle with a valid BUY/SELL.
+            # This allows continuation setups to be reported instead of requiring
+            # the direction to flip from BUY to SELL (or vice versa).
+            if direction in ("BUY", "SELL"):
                 await context.bot.send_message(chat_id=CHAT_ID, text=minimal_signal_message(message))
+                log.info("Signal alert sent: %s at completed M15 candle %s", direction, candle_time)
+            else:
+                log.info("No alert at completed M15 candle %s: WAIT", candle_time)
             context.application.bot_data["last_alert_key"] = current_key
     except Exception:
         log.exception("signal watch failed")
