@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -352,13 +353,17 @@ def detect_order_block(candles, direction, search=12):
     if direction == "BUY":
         if last["close"] <= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
             return "NONE"
-        for candle in reversed(recent):
+        for offset, candle in enumerate(reversed(recent)):
+            if offset > 3:
+                break
             if candle["close"] < candle["open"]:
                 return f"BULLISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
     elif direction == "SELL":
         if last["close"] >= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
             return "NONE"
-        for candle in reversed(recent):
+        for offset, candle in enumerate(reversed(recent)):
+            if offset > 3:
+                break
             if candle["close"] > candle["open"]:
                 return f"BEARISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
     return "NONE"
@@ -485,10 +490,7 @@ def analyze():
             buy_score += 1
         elif s15["trend"] == "BEARISH":
             sell_score += 1
-    if "bullish manipulation" in po3:
-        buy_score += 1
-    elif "bearish manipulation" in po3:
-        sell_score += 1
+    # PO3 clue is displayed for context only; do not double-count the same sweep.
 
     # Require a meaningful score and separation from the opposing side to avoid
     # treating a mixed/ranging market as a confirmed entry.
@@ -582,7 +584,8 @@ def analyze():
         f"• Market Structure: {structure}\n"
         f"• Support: {money(support)}\n"
         f"• Resistance: {money(resistance)}\n"
-        f"• FVG لە M15: {fvg}\n"        f"• Liquidity Sweep: {liquidity}\n"
+        f"• FVG لە M15: {fvg}\n"
+        f"• Liquidity Sweep: {liquidity}\n"
         f"• MSS/BOS (heuristic): {mss}\n"
         f"• Order Block BUY: {bullish_ob}\n"
         f"• Order Block SELL: {bearish_ob}\n"
@@ -671,7 +674,7 @@ def section_text(message, section):
     if section == "menu_risk":
         risk = after_heading(
             "🛡️ پلانی مامەڵە و ڕیسک",
-            ["📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)"],
+            ["📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)"],
         )
         return risk or "زانیاریی پلانی ڕیسک بەردەست نییە."
     if section == "menu_reason":
@@ -680,7 +683,7 @@ def section_text(message, section):
         return "\n".join(part for part in [reason, technical] if part) or "وردەکاریی هۆکاری سیگناڵ بەردەست نییە."
     if section == "menu_news":
         news = after_heading(
-            "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (وەرگێڕانی ئۆتۆماتیکی؛ زانیارییە، نەک فلتەری سیگناڵ)",
+            "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)",
             ["━━━━━━━━━━━━━━━━━━"],
         )
         return ("📰 هەواڵ و فەندامێنتاڵ\n\n" + news
@@ -705,6 +708,10 @@ def section_text(message, section):
     return "بەخێربێیت بۆ HANO BTC AI."
 
 
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled Telegram update error", exc_info=context.error)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 HANO BTC AI\n"
@@ -726,7 +733,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     try:
-        message = analyze()
+        message = await asyncio.to_thread(analyze)
         body = section_text(message, section)
     except Exception:
         log.exception("menu analysis failed")
@@ -751,7 +758,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        message = analyze()
+        message = await asyncio.to_thread(analyze)
         await update.message.reply_text(minimal_signal_message(message), parse_mode="HTML")
     except Exception:
         log.exception("analysis failed")
@@ -765,7 +772,7 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
     if not CHAT_ID:
         return
     try:
-        message = analyze()
+        message = await asyncio.to_thread(analyze)
         direction_marker = "🎯 ئەنجام: "
         direction = next(
             (line.split(direction_marker, 1)[1].strip()
@@ -808,6 +815,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_"))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("signal", signal))
+    app.add_error_handler(telegram_error_handler)
     if CHAT_ID:
         app.job_queue.run_repeating(signal_watch_job, interval=WATCH_INTERVAL, first=15)
     app.run_polling(drop_pending_updates=True)
