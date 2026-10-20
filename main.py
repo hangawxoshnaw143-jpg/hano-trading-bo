@@ -492,10 +492,10 @@ def analyze():
             sell_score += 1
     # PO3 clue is displayed for context only; do not double-count the same sweep.
 
-    # Require a meaningful score and separation from the opposing side to avoid
-    # treating a mixed/ranging market as a confirmed entry.
-    buy_ok = buy_score >= 5 and buy_score >= sell_score + 2
-    sell_ok = sell_score >= 5 and sell_score >= buy_score + 2
+    # Calibrated for more valid opportunities while retaining score separation.
+    # This remains a heuristic; validate on historical data and demo before live use.
+    buy_ok = buy_score >= 4 and buy_score >= sell_score + 1
+    sell_ok = sell_score >= 4 and sell_score >= buy_score + 1
 
     fundamental_ok, fundamental_status, impact_headlines = fundamental_news_guard()
     if not fundamental_ok:
@@ -504,7 +504,7 @@ def analyze():
 
     direction, reason = "WAIT", (
         fundamental_status if not fundamental_ok
-        else f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}؛ نمرەی پێویست 5 و جیاوازی لانیکەم 2 ـە."
+        else f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}؛ نمرەی پێویست 4 و جیاوازی لانیکەم 1 ـە."
     )
     entry = sl = tp = None
     if buy_ok:
