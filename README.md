@@ -34,3 +34,9 @@ The watcher checks regularly and sends BUY/SELL only when a new completed M15 ca
 - Only one process may poll Telegram updates for this bot token. A `telegram.error.Conflict: terminated by other getUpdates request` means another process is polling with the same token. Check any old Railway/Replit/Codespaces/Termux instance before restarting.
 - Runtime health and successful deployment do not prove that signal strategy is profitable. Backtest with historical data and verify alerts in MT5 Demo before relying on them.
 - The bot does not place orders or connect to MT5.
+
+
+## Signal-message safety
+- A WAIT result is formatted as `WAIT — NO ACTIVE TRADE`; any associated entry/TP/SL values are explicitly labelled indicative and not confirmed. Do not trade a WAIT plan.
+- Confirmed BUY/SELL compact messages continue to show the signal entry, stop loss and take profit.
+- A Telegram polling conflict cannot be fixed safely by changing the formatter: stop every other process using the same bot token and keep only one polling instance active.
