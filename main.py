@@ -602,7 +602,7 @@ def analyze():
 
 
 def minimal_signal_message(message):
-    """Return only the six requested signal lines."""
+    """Format a concise signal without presenting a WAIT plan as an active trade."""
     import re
 
     def read_price(pattern):
@@ -614,18 +614,37 @@ def minimal_signal_message(message):
         except (TypeError, ValueError):
             return None
 
+    lines = message.splitlines()
     outcome_line = next(
-        (line for line in message.splitlines()
+        (line for line in lines
          if line.startswith("🎯 ئەنجام:") or line.startswith("🚦 SIGNAL:")),
         "",
     )
     outcome = outcome_line.split(":", 1)[1].strip() if ":" in outcome_line else "WAIT"
-    entry = read_price(r"Entry(?: \(نرخی کەندڵی M15\))?: USD ([0-9,]+\.[0-9]{2})")
-    stop = read_price(r"Stop Loss(?: \(SL\))?: USD ([0-9,]+\.[0-9]{2})")
-    target = read_price(r"Take Profit(?: \(TP\))?: USD ([0-9,]+\.[0-9]{2})")
+    plan_line = next((line for line in lines if line.startswith("ئاراستەی پلان:")), "")
+    plan_direction = plan_line.split(":", 1)[1].strip() if ":" in plan_line else "N/A"
+
+    # Prefer the confirmed setup's M15 entry; otherwise use the labelled WAIT plan.
+    entry = read_price(r"Entry \(نرخی کەندڵی M15\): USD ([0-9,]+\.[0-9]{2})")
+    stop = read_price(r"Stop Loss \(SL\): USD ([0-9,]+\.[0-9]{2})")
+    target = read_price(r"Take Profit \(TP\): USD ([0-9,]+\.[0-9]{2})")
+    if entry is None:
+        entry = read_price(r"Entry: USD ([0-9,]+\.[0-9]{2})")
 
     def price(value):
         return format(value, ",.2f") if value is not None else "N/A"
+
+    if outcome not in ("BUY", "SELL"):
+        return (
+            "📊 Hano Trading Bot — Bitcoin\n"
+            "⏱️ Timeframe: M15 — SCALPING\n"
+            "🚦 SIGNAL: WAIT — NO ACTIVE TRADE\n"
+            f"🧭 PLAN ONLY: {plan_direction} (NOT CONFIRMED)\n"
+            f"💰 Indicative ENTRY: {price(entry)}\n"
+            f"🎯 Indicative TP: {price(target)}\n"
+            f"🛑 Indicative SL: {price(stop)}\n"
+            "⚠️ Do not open a trade from this WAIT plan."
+        )
 
     return (
         "📊 Hano Trading Bot — Bitcoin\n"
@@ -635,8 +654,6 @@ def minimal_signal_message(message):
         f"🎯 TP: {price(target)}\n"
         f"🛑 SL: {price(stop)}"
     )
-
-
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [
