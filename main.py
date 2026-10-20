@@ -535,35 +535,13 @@ def analyze():
             "Risk/Reward ئامانج: 1:2 (خەمڵاندنی پلان، نەک دڵنیایی)"
         )
     else:
-        # Always show an indicative plan, without changing WAIT into a trade signal.
-        if (s4["trend"] == "BEARISH" and s1["trend"] == "BEARISH") or structure.startswith("BEARISH"):
-            plan_direction = "SELL"
-            plan_entry = price
-            plan_sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
-            plan_tp = plan_entry - 2.0 * (plan_sl - plan_entry)
-        elif (s4["trend"] == "BULLISH" and s1["trend"] == "BULLISH") or structure.startswith("BULLISH"):
-            plan_direction = "BUY"
-            plan_entry = price
-            plan_sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
-            plan_tp = plan_entry + 2.0 * (plan_entry - plan_sl)
-        elif price >= (support + resistance) / 2:
-            plan_direction = "SELL"
-            plan_entry = price
-            plan_sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
-            plan_tp = plan_entry - 2.0 * (plan_sl - plan_entry)
-        else:
-            plan_direction = "BUY"
-            plan_entry = price
-            plan_sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
-            plan_tp = plan_entry + 2.0 * (plan_entry - plan_sl)
+        # WAIT means no active setup. Do not manufacture a directional plan from
+        # the price's position inside support/resistance; that can contradict the scores.
         risk_text = (
-            "⚠️ پلانی خەمڵێنراو بۆ چاودێری (سیگناڵی چالاک نییە)\n"
-            "ئاراستەی پلان: " + plan_direction + "\n"
-            "Entry: " + money(plan_entry) + "\n"
-            "Stop Loss (SL): " + money(plan_sl) + "\n"
-            "Take Profit (TP): " + money(plan_tp) + "\n"
-            "Risk/Reward ئامانج: 1:2\n"
-            "تێبینی: ئەنجام هەر WAIT ـە؛ تا سیگناڵ پشتڕاست نەبێتەوە مامەڵە مەکەرەوە."
+            "⚠️ WAIT — هیچ پلانی BUY/SELL نیشان نادرێت، چونکە سیگناڵ پشتڕاست نەکراوەتەوە.\n"
+            f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}\n"
+            "Entry / SL / TP: N/A تا کاتی پشتڕاستبوونەوەی سیگناڵ.\n"
+            "تێبینی: لەم دۆخەدا هیچ مامەڵەیەک مەکەرەوە."
         )
     return (
         "🤖 HANO BTC AI | BTC/USD • KRAKEN\n"
@@ -639,11 +617,11 @@ def minimal_signal_message(message):
             "📊 Hano Trading Bot — Bitcoin\n"
             "⏱️ Timeframe: M15 — SCALPING\n"
             "🚦 SIGNAL: WAIT — NO ACTIVE TRADE\n"
-            f"🧭 PLAN ONLY: {plan_direction} (NOT CONFIRMED)\n"
-            f"💰 Indicative ENTRY: {price(entry)}\n"
-            f"🎯 Indicative TP: {price(target)}\n"
-            f"🛑 Indicative SL: {price(stop)}\n"
-            "⚠️ Do not open a trade from this WAIT plan."
+            "🧭 PLAN: NONE — WAIT FOR CONFIRMATION\n"
+            "💰 ENTRY: N/A\n"
+            "🎯 TP: N/A\n"
+            "🛑 SL: N/A\n"
+            "⚠️ Do not open a trade until BUY/SELL is confirmed."
         )
 
     return (
