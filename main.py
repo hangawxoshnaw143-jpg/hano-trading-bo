@@ -309,6 +309,111 @@ def money(value):
     return "USD " + format(value, ",.2f")
 
 
+
+def detect_liquidity_sweep(candles, lookback=20):
+    """Heuristic sweep: wick takes prior range liquidity, close returns inside."""
+    if len(candles) < lookback + 2:
+        return "NONE"
+    prior = candles[-(lookback + 1):-1]
+    last = candles[-1]
+    prior_high = max(x["high"] for x in prior)
+    prior_low = min(x["low"] for x in prior)
+    if last["high"] > prior_high and last["close"] < prior_high:
+        return "BUY-SIDE LIQUIDITY SWEPT (bearish clue)"
+    if last["low"] < prior_low and last["close"] > prior_low:
+        return "SELL-SIDE LIQUIDITY SWEPT (bullish clue)"
+    return "NONE"
+
+
+def detect_mss(candles, lookback=40):
+    """Simple close-confirmed break of recent swing; heuristic MSS, not canonical labeling."""
+    if len(candles) < lookback + 3:
+        return "NONE"
+    prior = candles[-(lookback + 1):-1]
+    last = candles[-1]
+    prior_high = max(x["high"] for x in prior)
+    prior_low = min(x["low"] for x in prior)
+    if last["close"] > prior_high:
+        return "BULLISH MSS/BOS"
+    if last["close"] < prior_low:
+        return "BEARISH MSS/BOS"
+    return "NONE"
+
+
+def detect_order_block(candles, direction, search=12):
+    """Basic OB candidate: last opposite candle before a strong directional candle."""
+    if len(candles) < search + 2:
+        return "NONE"
+    last = candles[-1]
+    recent = candles[-(search + 1):-1]
+    avg_range = sum(x["high"] - x["low"] for x in recent) / max(len(recent), 1)
+    if avg_range <= 0:
+        return "NONE"
+    if direction == "BUY":
+        if last["close"] <= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
+            return "NONE"
+        for candle in reversed(recent):
+            if candle["close"] < candle["open"]:
+                return f"BULLISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
+    elif direction == "SELL":
+        if last["close"] >= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
+            return "NONE"
+        for candle in reversed(recent):
+            if candle["close"] > candle["open"]:
+                return f"BEARISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
+    return "NONE"
+
+
+def adx_value(candles, period=14):
+    """Wilder-style ADX estimate from completed candles."""
+    if len(candles) < period * 2 + 2:
+        return 0.0
+    tr, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(candles)):
+        cur, prev = candles[i], candles[i - 1]
+        up = cur["high"] - prev["high"]
+        down = prev["low"] - cur["low"]
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+        tr.append(max(cur["high"] - cur["low"], abs(cur["high"] - prev["close"]), abs(cur["low"] - prev["close"])))
+    def smooth(values):
+        out = [sum(values[:period])]
+        for val in values[period:]:
+            out.append(out[-1] - out[-1] / period + val)
+        return out
+    tr_s, p_s, m_s = smooth(tr), smooth(plus_dm), smooth(minus_dm)
+    dx = []
+    for t, p, m in zip(tr_s, p_s, m_s):
+        if t <= 0:
+            dx.append(0.0)
+        else:
+            pdi, mdi = 100 * p / t, 100 * m / t
+            dx.append(100 * abs(pdi - mdi) / (pdi + mdi) if pdi + mdi else 0.0)
+    if len(dx) < period:
+        return sum(dx) / len(dx) if dx else 0.0
+    value = sum(dx[:period]) / period
+    for item in dx[period:]:
+        value = ((period - 1) * value + item) / period
+    return value
+
+
+def po3_phase(candles, lookback=24):
+    """Loose accumulation/manipulation/distribution clue; informational only."""
+    if len(candles) < lookback + 2:
+        return "UNKNOWN"
+    prior = candles[-(lookback + 1):-1]
+    last = candles[-1]
+    hi = max(x["high"] for x in prior)
+    lo = min(x["low"] for x in prior)
+    mid = (hi + lo) / 2
+    if last["low"] < lo and last["close"] > lo:
+        return "PO3 bullish manipulation/reclaim clue"
+    if last["high"] > hi and last["close"] < hi:
+        return "PO3 bearish manipulation/reclaim clue"
+    if last["close"] > mid:
+        return "PO3 range upper half (not confirmation)"
+    return "PO3 range lower half (not confirmation)"
+
 def analyze():
     h4 = get_candles("4h")
     h1 = get_candles("1h")
@@ -320,6 +425,12 @@ def analyze():
     volume_avg = sum(c["volume"] for c in m15[-21:-1]) / 20
     volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg > 0 else 0
     fvg = detect_fvg(m15)
+    liquidity = detect_liquidity_sweep(m15)
+    mss = detect_mss(m15)
+    bullish_ob = detect_order_block(m15, "BUY")
+    bearish_ob = detect_order_block(m15, "SELL")
+    adx = adx_value(m15)
+    po3 = po3_phase(m15)
 
     # Weighted confirmation model: higher timeframes guide direction, but do not all
     # have to align. Pullback rejection is supportive evidence, not a mandatory gate.
@@ -360,6 +471,25 @@ def analyze():
         elif m15[-1]["close"] < m15[-1]["open"]:
             sell_score += 1
 
+    # Extra SMC/ICT-style clues. These are heuristic confirmations, never standalone entries.
+    if "SELL-SIDE LIQUIDITY SWEPT" in liquidity or mss == "BULLISH MSS/BOS":
+        buy_score += 1
+    if "BUY-SIDE LIQUIDITY SWEPT" in liquidity or mss == "BEARISH MSS/BOS":
+        sell_score += 1
+    if bullish_ob.startswith("BULLISH OB"):
+        buy_score += 1
+    if bearish_ob.startswith("BEARISH OB"):
+        sell_score += 1
+    if adx >= 20:
+        if s15["trend"] == "BULLISH":
+            buy_score += 1
+        elif s15["trend"] == "BEARISH":
+            sell_score += 1
+    if "bullish manipulation" in po3:
+        buy_score += 1
+    elif "bearish manipulation" in po3:
+        sell_score += 1
+
     # Require a meaningful score and separation from the opposing side to avoid
     # treating a mixed/ranging market as a confirmed entry.
     buy_ok = buy_score >= 5 and buy_score >= sell_score + 2
@@ -377,13 +507,13 @@ def analyze():
     entry = sl = tp = None
     if buy_ok:
         direction = "BUY"
-        reason = "H4 و H1 و M15 هەموویان پشتگیریی BUY دەکەن و پێکهاتەی M15 بەرەو سەرەوەیە."
+        reason = f"BUY: نمرە {buy_score}؛ پێکهاتە={structure}؛ liquidity={liquidity}؛ MSS/BOS={mss}؛ ADX={adx:.1f}."
         entry = price
         sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
         tp = entry + 2.0 * (entry - sl)
     elif sell_ok:
         direction = "SELL"
-        reason = "H4 و H1 و M15 هەموویان پشتگیریی SELL دەکەن و پێکهاتەی M15 بەرەو خوارەوەیە."
+        reason = f"SELL: نمرە {sell_score}؛ پێکهاتە={structure}؛ liquidity={liquidity}؛ MSS/BOS={mss}؛ ADX={adx:.1f}."
         entry = price
         sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
         tp = entry - 2.0 * (sl - entry)
@@ -452,7 +582,13 @@ def analyze():
         f"• Market Structure: {structure}\n"
         f"• Support: {money(support)}\n"
         f"• Resistance: {money(resistance)}\n"
-        f"• FVG لە M15: {fvg}\n"
+        f"• FVG لە M15: {fvg}\n"        f"• Liquidity Sweep: {liquidity}\n"
+        f"• MSS/BOS (heuristic): {mss}\n"
+        f"• Order Block BUY: {bullish_ob}\n"
+        f"• Order Block SELL: {bearish_ob}\n"
+        f"• ADX(14) خەمڵێنراو: {adx:.1f}\n"
+        f"• PO3 clue (heuristic): {po3}\n"
+
         f"• Volumeی M15 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
         f"• ATR(14) لە M15: {money(volatility)}\n\n"
         "🛡️ پلانی مامەڵە و ڕیسک\n" + risk_text + "\n\n"
@@ -556,12 +692,15 @@ def section_text(message, section):
             "📚 فێربوون بە کوردی سۆرانی\n\n"
             "• EMA20/EMA50: ناوەندی جوڵەی نرخ\n"
             "• RSI: پێوانەی هێزی جوڵەی نرخ\n"
-            "• Market Structure: پێکهاتەی بازاڕ\n"
-            "• BOS/MSS: شکاندنی پێکهاتە / گۆڕانی پێکهاتە\n"
+            "• Market Structure و BOS: پێکهاتە و شکاندنی پێکهاتە\n"
+            "• MSS: نیشانەی گۆڕانی ئاراستە (خەمڵاندنی سادە)\n"
             "• FVG: بۆشایی نرخی نێوان کەندڵەکان\n"
-            "• Support/Resistance: پشتگیری و بەرگری\n"
-            "• ATR: پێوانەی نوسانی نرخ\n\n"
-            "ئەم وشانە لێرەدا بۆ فێرکارییە؛ یاسای سیگناڵ ناگۆڕن."
+            "• Liquidity Sweep: شکاندنی کاتیی بەرز/نزم و گەڕانەوە\n"
+            "• Order Block: کەندڵی پێچەوانە پێش جوڵەی بەهێز (خەمڵاندن)\n"
+            "• ADX: پێوانەی بەهێزی ترێند، نەک ئاراستە\n"
+            "• PO3: خەمڵاندنی فازی کۆکردنەوە/فێڵ/بڵاوبوونەوە\n"
+            "• Support/Resistance و ATR: پشتگیری/بەرگری و نوسان\n\n"
+            "ئەم دۆزینەوانە خەمڵاندنی کۆدن؛ پێویستیان بە backtest و demo هەیە."
         )
     return "بەخێربێیت بۆ HANO BTC AI."
 
