@@ -106,6 +106,7 @@ int OnInit()
 
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(MaxDeviationPts);
+   trade.SetTypeFillingBySymbol(_Symbol);
    Print("HANO Demo EA initialized. Confirm DEMO account and keep live trading disabled.");
    return INIT_SUCCEEDED;
 }
@@ -136,7 +137,10 @@ void OnTick()
    if(!IsNewBar() || HasOurPosition())
       return;
 
-   double fast[3], slow[3], atr[3];
+   double fast[], slow[], atr[];
+   ArrayResize(fast, 3);
+   ArrayResize(slow, 3);
+   ArrayResize(atr, 3);
    ArraySetAsSeries(fast, true);
    ArraySetAsSeries(slow, true);
    ArraySetAsSeries(atr, true);
