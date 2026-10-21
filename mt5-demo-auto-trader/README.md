@@ -1,31 +1,29 @@
 # HANO MT5 Demo Auto-Trader (isolated draft)
 
-This folder is an isolated starter for testing an automated MT5 Expert Advisor on a **demo account only**. It does not modify the existing Telegram analysis bot on `main`.
+This folder is isolated from the existing Telegram bot and is for **demo testing only**.
 
 ## Important platform limit
 
-The Android MT5 app can monitor an account but cannot run an Expert Advisor. The `.mq5` file must be compiled and run inside MetaTrader 5 desktop on Windows, or on a Windows VPS. GitHub Codespaces/Railway Linux containers do not run the Windows MT5 terminal directly. A Windows VPS may cost money; do not buy one until you choose a provider and understand its price.
-
-## Strategy in this starter
-
-- EMA 20 / EMA 50 crossover on M15.
-- ATR-based stop loss and take profit.
-- Fixed requested volume (default 0.01 lot); trading is skipped if the broker's volume rules do not permit it.
-- At most one open position per symbol and magic number.
-- Only runs on a broker account that MT5 identifies as DEMO.
-- `EnableDemoTrading` is false by default and must be explicitly enabled in the EA inputs.
-- This is a simple engineering test strategy, **not** the user's requested final strategy and not evidence of profitability.
-
-## How to test (requires Windows MT5)
-
-1. Open a broker-provided MT5 demo account.
-2. On Windows MT5, open MetaEditor and create/copy `HANO_DemoEA.mq5` into `MQL5/Experts/`.
-3. Compile it in MetaEditor.
-4. Open an EURUSD or XAUUSD chart and choose M15.
-5. Attach the EA, enable Algo Trading, and set `EnableDemoTrading=true` in its inputs.
-6. Verify the account is DEMO and review every trade in the Strategy Tester and demo account.
-7. Do not use on a live account. The EA has an account-mode guard, but always verify the account and settings yourself.
+The MetaTrader 5 Android app cannot run custom Expert Advisors. A `.mq5` source file must be compiled with MetaEditor and run in the desktop MT5 terminal on Windows, or on a compatible Windows VPS. Do not buy hosting until the cost and setup are understood.
 
 ## Files
 
-- `HANO_DemoEA.mq5`: demo-guarded MQL5 Expert Advisor source.
+- `HANO_DemoEA.mq5`: older EMA 20/50 + ATR example. It is **not** the requested SNRZ strategy.
+- `HANO_SNRZ_DemoEA.mq5`: new SNRZ-inspired research prototype. It combines a simple higher-timeframe structure filter with approximate liquidity-sweep, engulfing, FVG/imbalance and range-edge checks. This is **not a verified reproduction of Zindan's full course rules**; the exact proprietary entry criteria are not available in the public summary.
+
+## Safety and testing
+
+- Both files require an MT5 DEMO account and default to `EnableDemoTrading=false`.
+- The new prototype limits the input risk percentage to 1% or less, but actual loss can differ because of slippage, gaps, execution and symbol contract details.
+- The code has been committed to GitHub but has **not yet been compiled or backtested**. Do not enable it for live trading.
+- Before any demo execution: compile in MetaEditor, resolve every compiler warning/error, backtest across multiple market periods, inspect trades, then run on demo only.
+
+## Desktop installation steps (Windows MT5 required)
+
+1. Download `HANO_SNRZ_DemoEA.mq5` from the GitHub branch.
+2. In MT5 desktop, open MetaEditor and place the file in `MQL5/Experts/`.
+3. Compile with F7 and confirm there are no errors.
+4. Run Strategy Tester first, then use a demo account only.
+5. Keep `EnableDemoTrading=false` until compilation and testing are complete.
+
+This README does not claim that the EA has been installed or tested.
