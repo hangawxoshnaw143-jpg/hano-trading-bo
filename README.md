@@ -19,7 +19,7 @@ Telegram bot for BTC/USD analysis and confirmed-signal alerts. It never places t
 ## Railway environment variables
 - `TELEGRAM_BOT_TOKEN` — Telegram BotFather token (secret).
 - `TELEGRAM_CHAT_ID` — optional numeric chat ID for automatic alerts.
-- `WATCH_INTERVAL_SECONDS` — optional polling interval; defaults to 60 seconds, minimum 30.
+- `WATCH_INTERVAL_SECONDS` — optional market-scan interval; defaults to 30 seconds, minimum 30. This is only the scan cadence, not a timed signal schedule.
 
 ## Telegram commands
 - `/start`
@@ -27,7 +27,18 @@ Telegram bot for BTC/USD analysis and confirmed-signal alerts. It never places t
 - `/signal`
 
 ## Automatic alerts
-The watcher checks regularly and sends BUY/SELL only when a new completed M15 candle has a qualifying signal. WAIT is not sent as a trade alert. The watcher suppresses the initial alert after process startup to avoid sending an old signal immediately. Its deduplication baseline is held in memory; after restarts, behavior can repeat or skip an alert depending on candle timing.
+The watcher scans market data every 30 seconds by default, but it does **not** send a signal on a timer. It sends an alert only when a newly completed M15 candle confirms a setup. The independent setup detectors are:
+- Liquidity-sweep reversal
+- 20-candle range breakout / BOS
+- Confirmed pullback rejection
+- FVG formation with directional-candle confirmation
+- Order-block displacement and retest
+- PO3-style sweep of the recent H1 range
+- Bullish/bearish engulfing with momentum confirmation
+
+Each detector can create its own signal with its own reason, entry, stop loss, and 2R target; a detector does not require the other strategies to agree. A shared risk sanity check and macro-news guard still apply. Signals use completed candles, so a setup is confirmed at candle close; this is not a tick-by-tick WebSocket engine. WAIT is never sent as a trade alert.
+
+The watcher deduplicates by strategy, direction, and candle timestamp in memory. On startup it establishes a baseline and suppresses setups already present, to avoid sending stale/repeated alerts. Because Railway is not configured with persistent storage for watcher state, a restart can reset this in-memory history; historical setups are suppressed during the initial baseline scan.
 
 ## Deployment and validation
 - Railway is configured as a single-replica worker using `Procfile` (`worker: python main.py`).
