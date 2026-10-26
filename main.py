@@ -432,7 +432,7 @@ def _build_independent_candidate(strategy, direction, candles, volatility, reaso
     stop = float(stop_price)
     risk = entry - stop if direction == "BUY" else stop - entry
     min_risk = max(volatility * 0.15, entry * 0.00025)
-    max_risk = max(volatility * 3.5, entry * 0.02)
+    max_risk = min(volatility * 3.5, entry * 0.02)
     if risk < min_risk or risk > max_risk:
         return None
     target = entry + 2.0 * risk if direction == "BUY" else entry - 2.0 * risk
