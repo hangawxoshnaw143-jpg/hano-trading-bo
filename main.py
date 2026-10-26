@@ -458,7 +458,7 @@ def _order_block_retest_zone(candles, direction, volatility, lookback=18):
         return None
     last = candles[-1]
     start = max(1, len(candles) - lookback - 3)
-    for index in range(start, len(candles) - 2):
+    for index in range(len(candles) - 3, start - 1, -1):
         ob = candles[index]
         before = candles[max(0, index - 5):index]
         after = candles[index + 1:min(index + 4, len(candles) - 1)]
