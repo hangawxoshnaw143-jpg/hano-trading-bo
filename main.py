@@ -491,6 +491,8 @@ def independent_signal_candidates(m15, h1, h4):
         return []
     average_volume = sum(c["volume"] for c in m15[-21:-1]) / 20
     volume_ratio = last["volume"] / average_volume if average_volume > 0 else 0.0
+    h1_trend = timeframe_summary(h1)["trend"]
+    h4_trend = timeframe_summary(h4)["trend"]
     candidates = []
 
     def add(strategy, direction, reason, stop_price=None):
@@ -498,6 +500,9 @@ def independent_signal_candidates(m15, h1, h4):
             strategy, direction, m15, volatility, reason, stop_price=stop_price
         )
         if candidate:
+            # Higher-timeframe trends are context only; no strategy requires agreement.
+            candidate["h1_trend"] = h1_trend
+            candidate["h4_trend"] = h4_trend
             candidates.append(candidate)
 
     # 1) Liquidity sweep reversal: wick takes a prior extreme, then candle closes back inside.
