@@ -82,7 +82,7 @@ log = logging.getLogger("hano-btc-ai")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WATCH_INTERVAL = max(30, int(os.getenv("WATCH_INTERVAL_SECONDS", "60")))
+WATCH_INTERVAL = max(30, int(os.getenv("WATCH_INTERVAL_SECONDS", "30")))
 KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -419,6 +419,179 @@ def po3_phase(candles, lookback=24):
         return "PO3 range upper half (not confirmation)"
     return "PO3 range lower half (not confirmation)"
 
+
+def _build_independent_candidate(strategy, direction, candles, volatility, reason, stop_price=None):
+    """Build a risk-checked signal from a completed candle; this never places a trade."""
+    if not candles or volatility <= 0:
+        return None
+    last = candles[-1]
+    entry = float(last["close"])
+    buffer = max(volatility * 0.15, entry * 0.0003)
+    if stop_price is None:
+        stop_price = last["low"] - buffer if direction == "BUY" else last["high"] + buffer
+    stop = float(stop_price)
+    risk = entry - stop if direction == "BUY" else stop - entry
+    min_risk = max(volatility * 0.15, entry * 0.00025)
+    max_risk = min(volatility * 3.5, entry * 0.02)
+    if risk < min_risk or risk > max_risk:
+        return None
+    target = entry + 2.0 * risk if direction == "BUY" else entry - 2.0 * risk
+    candle_epoch = int(last["time"])
+    candle_time = datetime.fromtimestamp(candle_epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
+    return {
+        "strategy": strategy,
+        "direction": direction,
+        "entry": entry,
+        "sl": stop,
+        "tp": target,
+        "risk_reward": "1:2",
+        "reason": reason,
+        "candle_time": candle_time,
+        "candle_epoch": candle_epoch,
+        "key": f"{strategy}:{direction}:{candle_epoch}",
+    }
+
+
+def _order_block_retest_zone(candles, direction, volatility, lookback=18):
+    """Find a recent opposite candle, displacement away, then a confirmed retest."""
+    if len(candles) < 12 or volatility <= 0:
+        return None
+    last = candles[-1]
+    start = max(1, len(candles) - lookback - 3)
+    for index in range(len(candles) - 3, start - 1, -1):
+        ob = candles[index]
+        before = candles[max(0, index - 5):index]
+        after = candles[index + 1:min(index + 4, len(candles) - 1)]
+        if not before or not after:
+            continue
+        if direction == "BUY" and ob["close"] < ob["open"]:
+            boundary = max(c["high"] for c in before)
+            displaced = any(c["close"] > boundary and c["close"] > c["open"]
+                            and c["close"] - c["open"] >= 0.6 * volatility for c in after)
+            retested = last["low"] <= ob["high"] and last["close"] > ob["high"] and last["close"] > last["open"]
+            if displaced and retested:
+                return ob["low"], ob["high"]
+        elif direction == "SELL" and ob["close"] > ob["open"]:
+            boundary = min(c["low"] for c in before)
+            displaced = any(c["close"] < boundary and c["close"] < c["open"]
+                            and c["open"] - c["close"] >= 0.6 * volatility for c in after)
+            retested = last["high"] >= ob["low"] and last["close"] < ob["low"] and last["close"] < last["open"]
+            if displaced and retested:
+                return ob["low"], ob["high"]
+    return None
+
+
+def independent_signal_candidates(m15, h1, h4):
+    """Return independent, completed-candle setup candidates with their own entry/SL/TP."""
+    if min(len(m15), len(h1), len(h4)) < 60:
+        raise RuntimeError("Not enough completed candles for independent signal scan")
+    last, previous = m15[-1], m15[-2]
+    volatility = atr(m15)
+    if volatility <= 0:
+        return []
+    average_volume = sum(c["volume"] for c in m15[-21:-1]) / 20
+    volume_ratio = last["volume"] / average_volume if average_volume > 0 else 0.0
+    h1_trend = timeframe_summary(h1)["trend"]
+    h4_trend = timeframe_summary(h4)["trend"]
+    candidates = []
+
+    def add(strategy, direction, reason, stop_price=None):
+        candidate = _build_independent_candidate(
+            strategy, direction, m15, volatility, reason, stop_price=stop_price
+        )
+        if candidate:
+            # Higher-timeframe trends are context only; no strategy requires agreement.
+            candidate["h1_trend"] = h1_trend
+            candidate["h4_trend"] = h4_trend
+            candidates.append(candidate)
+
+    # 1) Liquidity sweep reversal: wick takes a prior extreme, then candle closes back inside.
+    liquidity = detect_liquidity_sweep(m15, lookback=20)
+    if "BUY-SIDE LIQUIDITY SWEPT" in liquidity and last["close"] < last["open"]:
+        add("Liquidity Sweep", "SELL", "وەرگرتنی liquidityی سەرەوە و داخستنی شمع بە ئاراستەی دابەزین.", last["high"] + 0.15 * volatility)
+    elif "SELL-SIDE LIQUIDITY SWEPT" in liquidity and last["close"] > last["open"]:
+        add("Liquidity Sweep", "BUY", "وەرگرتنی liquidityی خوارەوە و داخستنی شمع بە ئاراستەی بەرزبوونەوە.", last["low"] - 0.15 * volatility)
+
+    # 2) Breakout/BOS: completed candle closes beyond the previous 20-candle range.
+    prior20 = m15[-21:-1]
+    range_high = max(c["high"] for c in prior20)
+    range_low = min(c["low"] for c in prior20)
+    body = abs(last["close"] - last["open"])
+    if last["close"] > range_high and last["close"] > last["open"] and body >= 0.35 * volatility and volume_ratio >= 0.80:
+        add("BOS Breakout", "BUY", "داخستنی شمعی تەواوبوو لە سەرووی بەرزی ٢٠ شمعی پێشوو.", min(last["low"], range_high) - 0.15 * volatility)
+    elif last["close"] < range_low and last["close"] < last["open"] and body >= 0.35 * volatility and volume_ratio >= 0.80:
+        add("BOS Breakout", "SELL", "داخستنی شمعی تەواوبوو لە خوار نزمترین ٢٠ شمعی پێشوو.", max(last["high"], range_low) + 0.15 * volatility)
+
+    # 3) Confirmed pullback/rejection continuation.
+    if pullback_rejection_confirmed(m15, "BUY"):
+        add("Pullback Rejection", "BUY", "HLی پشتڕاستکراو و شمعی بەهێزی بەردەوامبوونی بەرزبوونەوە.", min(c["low"] for c in m15[-5:]) - 0.15 * volatility)
+    if pullback_rejection_confirmed(m15, "SELL"):
+        add("Pullback Rejection", "SELL", "LHی پشتڕاستکراو و شمعی بەهێزی بەردەوامبوونی دابەزین.", max(c["high"] for c in m15[-5:]) + 0.15 * volatility)
+
+    # 4) FVG formation: gap plus directional candle/body confirmation.
+    a = m15[-3]
+    if last["low"] > a["high"]:
+        gap = last["low"] - a["high"]
+        if last["close"] > last["open"] and 0 < gap <= 0.8 * volatility and body >= 0.35 * volatility:
+            add("FVG", "BUY", "FVGی بەرزبوونەوە دروست بووە و شمعی کۆتایی بەهێز داخراوە.", last["low"] - 0.15 * volatility)
+    elif last["high"] < a["low"]:
+        gap = a["low"] - last["high"]
+        if last["close"] < last["open"] and 0 < gap <= 0.8 * volatility and body >= 0.35 * volatility:
+            add("FVG", "SELL", "FVGی دابەزین دروست بووە و شمعی کۆتایی بەهێز داخراوە.", last["high"] + 0.15 * volatility)
+
+    # 5) Order-block retest: displacement away from an opposite candle, then rejection at its zone.
+    buy_zone = _order_block_retest_zone(m15, "BUY", volatility)
+    if buy_zone:
+        add("Order Block Retest", "BUY", f"گەڕانەوە و ڕەتکردنەوەی ناوچەی OBی بەرزبوونەوە ({buy_zone[0]:.2f}-{buy_zone[1]:.2f}).", buy_zone[0] - 0.15 * volatility)
+    sell_zone = _order_block_retest_zone(m15, "SELL", volatility)
+    if sell_zone:
+        add("Order Block Retest", "SELL", f"گەڕانەوە و ڕەتکردنەوەی ناوچەی OBی دابەزین ({sell_zone[0]:.2f}-{sell_zone[1]:.2f}).", sell_zone[1] + 0.15 * volatility)
+
+    # 6) PO3-style manipulation of the H1 range, independently of the M15 range sweep.
+    h1_prior = h1[-25:-1]
+    h1_high = max(c["high"] for c in h1_prior)
+    h1_low = min(c["low"] for c in h1_prior)
+    if last["low"] < h1_low and last["close"] > h1_low and last["close"] > last["open"]:
+        add("PO3 H1 Range Sweep", "BUY", "شمعی M15 نزمترین سنووری H1ی شکاند و لە سەرووی سنوورەکە داخرا.")
+    elif last["high"] > h1_high and last["close"] < h1_high and last["close"] < last["open"]:
+        add("PO3 H1 Range Sweep", "SELL", "شمعی M15 بەرزترین سنووری H1ی شکاند و لە خوار سنوورەکە داخرا.")
+
+    # 7) Engulfing: a completed candle engulfs the previous candle body with sufficient momentum.
+    if previous["close"] < previous["open"] and last["close"] > last["open"]:
+        bullish_engulf = last["open"] <= previous["close"] and last["close"] >= previous["open"]
+        if bullish_engulf and body >= 0.5 * volatility and volume_ratio >= 0.90:
+            add("Engulfing", "BUY", "شمعی بەرزبوونەوە جەستەی شمعی پێشوو داپۆشیوە و هێزی جوڵە هەیە.")
+    elif previous["close"] > previous["open"] and last["close"] < last["open"]:
+        bearish_engulf = last["open"] >= previous["close"] and last["close"] <= previous["open"]
+        if bearish_engulf and body >= 0.5 * volatility and volume_ratio >= 0.90:
+            add("Engulfing", "SELL", "شمعی دابەزین جەستەی شمعی پێشوو داپۆشیوە و هێزی جوڵە هەیە.")
+
+    # Keep one alert per strategy/direction/candle; separate strategies remain independent.
+    unique = {}
+    for candidate in candidates:
+        unique[candidate["key"]] = candidate
+    return list(unique.values())
+
+
+def format_independent_signal(candidate, fundamental_status):
+    return (
+        "🤖 HANO BTC AI | BTC/USD • KRAKEN\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🚦 سیگناڵ: {candidate['direction']}\n"
+        f"🧠 ستراتیژی: {candidate['strategy']}\n"
+        "⏱️ تایمفریم: M15 (شمعی تەواوبوو)\n"
+        f"📊 ئاراستەی تایمفریمە گەورەکان (تەنها زانیاری): H4={candidate['h4_trend']} | H1={candidate['h1_trend']}\n"
+        f"🕯️ کاتی پشتڕاستکردنەوە (UTC): {candidate['candle_time']}\n"
+        f"💵 Entry: {money(candidate['entry'])}\n"
+        f"🛑 Stop Loss: {money(candidate['sl'])}\n"
+        f"🎯 Take Profit: {money(candidate['tp'])}\n"
+        f"📐 Risk/Reward: {candidate['risk_reward']}\n"
+        f"🔎 هۆکار: {candidate['reason']}\n"
+        f"📰 فلتەری هەواڵ: {fundamental_status}\n\n"
+        "⚠️ ئەمە سیگناڵی شیکارییە، نەک دڵنیایی لە قازانج. بۆتەکە مامەڵەی ئۆتۆماتیکی ناکات."
+    )
+
+
 def analyze():
     h4 = get_candles("4h")
     h1 = get_candles("1h")
@@ -746,7 +919,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/signal — نوێترین شیکاری BTC/USD\n"
         "/help — ئەم ڕێنماییە\n\n"
         "لە شیکارییەکەدا: ئاراستە و هۆکار، H4/H1/M15، EMA20/50، RSI، ATR، Support/Resistance، Market Structure، FVG، Volume، Entry/Stop Loss/Take Profit و سەردێڕی هەواڵ دەبینیت.\n\n"
-        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی تەنها بۆ گۆڕانی ئاراستەی BUY/SELL ـی پشتڕاستکراوەیە؛ WAIT سیگناڵی مامەڵە نییە.\n"
+        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی بە پێی دۆزینەوەی ستاپە پشتڕاستکراوەکانە؛ هەر ستراتیژییەک بە جیا سیگناڵ دەنێرێت. WAIT نانێردرێت.\n"
         "⚠️ بۆتەکە تەنها شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات."
     )
 
@@ -764,42 +937,54 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
+    """Scan frequently; alerts are triggered by newly detected setups, not by a timer."""
     if not CHAT_ID:
         return
     try:
-        message = await asyncio.to_thread(analyze)
-        direction_marker = "🎯 ئەنجام: "
-        direction = next(
-            (line.split(direction_marker, 1)[1].strip()
-             for line in message.splitlines() if direction_marker in line),
-            "WAIT",
-        )
-        candle_marker = "🕒 کەندڵی M15 (UTC): "
-        candle_time = next(
-            (line.split(candle_marker, 1)[1].strip()
-             for line in message.splitlines() if candle_marker in line),
-            "",
-        )
-        current_key = f"{candle_time}:{direction}"
-        previous_key = context.application.bot_data.get("last_alert_key")
-        if previous_key is None:
-            context.application.bot_data["last_alert_key"] = current_key
-            log.info("Watcher baseline set; startup alert suppressed")
+        # Use the shared HTTP session sequentially to avoid concurrent Session access.
+        m15 = await asyncio.to_thread(get_candles, "15m")
+        h1 = await asyncio.to_thread(get_candles, "1h")
+        h4 = await asyncio.to_thread(get_candles, "4h")
+        candidates = await asyncio.to_thread(independent_signal_candidates, m15, h1, h4)
+        fundamental_ok, fundamental_status, _ = await asyncio.to_thread(fundamental_news_guard)
+        if not fundamental_ok:
+            log.info("Independent signal scan blocked by macro-news guard: %s", fundamental_status)
+            candidates = []
+
+        bot_data = context.application.bot_data
+        seen = bot_data.setdefault("seen_signal_keys", {})
+        if not bot_data.get("independent_watcher_initialized"):
+            for candidate in candidates:
+                seen[candidate["key"]] = time.time()
+            bot_data["independent_watcher_initialized"] = True
+            log.info("Independent watcher baseline set; existing setups suppressed to avoid stale/repeated alerts (%d candidates)", len(candidates))
             return
-        previous_direction = previous_key.rsplit(":", 1)[-1]
-        previous_candle = previous_key.rsplit(":", 1)[0]
-        if candle_time and candle_time != previous_candle:
-            # Alert on each newly completed M15 candle with a valid BUY/SELL.
-            # This allows continuation setups to be reported instead of requiring
-            # the direction to flip from BUY to SELL (or vice versa).
-            if direction in ("BUY", "SELL"):
-                await context.bot.send_message(chat_id=CHAT_ID, text=minimal_signal_message(message))
-                log.info("Signal alert sent: %s at completed M15 candle %s", direction, candle_time)
-            else:
-                log.info("No alert at completed M15 candle %s: WAIT", candle_time)
-            context.application.bot_data["last_alert_key"] = current_key
+
+        now = time.time()
+        for key, seen_at in list(seen.items()):
+            if now - seen_at > 48 * 60 * 60:
+                seen.pop(key, None)
+
+        for candidate in candidates:
+            key = candidate["key"]
+            if key in seen:
+                continue
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=format_independent_signal(candidate, fundamental_status),
+            )
+            seen[key] = now
+            log.info(
+                "Independent signal sent: %s %s | strategy=%s | candle=%s",
+                candidate["direction"], candidate["entry"], candidate["strategy"], candidate["candle_time"],
+            )
+
+        if len(seen) > 500:
+            oldest = sorted(seen.items(), key=lambda item: item[1])[:len(seen) - 350]
+            for key, _ in oldest:
+                seen.pop(key, None)
     except Exception:
-        log.exception("signal watch failed")
+        log.exception("independent signal watcher failed")
 
 
 def main():
