@@ -58,7 +58,7 @@ class IndependentSignalTests(unittest.TestCase):
     def test_alert_formatter_names_strategy_and_risk_levels(self):
         candles = make_candles(2)
         candidate = main._build_independent_candidate(
-            "Liquidity Sweep", "SELL", candles, 2.0, "unit test", stop_price=105.0
+            "Liquidity Sweep", "SELL", candles, 2.0, "unit test", stop_price=candles[-1]["close"] + 1.0
         )
         message = main.format_independent_signal(candidate, "CLEAR")
         self.assertIn("Liquidity Sweep", message)
