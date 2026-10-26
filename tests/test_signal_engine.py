@@ -1,5 +1,4 @@
 import unittest
-from datetime import datetime, timezone
 
 import main
 
@@ -24,7 +23,7 @@ class IndependentSignalTests(unittest.TestCase):
     def test_candidate_has_correct_two_to_one_target(self):
         candles = make_candles(2)
         candidate = main._build_independent_candidate(
-            "Test Strategy", "BUY", candles, 2.0, "unit test", stop_price=98.0
+            "Test Strategy", "BUY", candles, 2.0, "unit test", stop_price=candles[-1]["close"] - 2.0
         )
         self.assertIsNotNone(candidate)
         self.assertAlmostEqual(candidate["entry"] - candidate["sl"], 2.0)
