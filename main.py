@@ -913,7 +913,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/signal — نوێترین شیکاری BTC/USD\n"
         "/help — ئەم ڕێنماییە\n\n"
         "لە شیکارییەکەدا: ئاراستە و هۆکار، H4/H1/M15، EMA20/50، RSI، ATR، Support/Resistance، Market Structure، FVG، Volume، Entry/Stop Loss/Take Profit و سەردێڕی هەواڵ دەبینیت.\n\n"
-        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی تەنها بۆ گۆڕانی ئاراستەی BUY/SELL ـی پشتڕاستکراوەیە؛ WAIT سیگناڵی مامەڵە نییە.\n"
+        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی بە پێی دۆزینەوەی ستاپە پشتڕاستکراوەکانە؛ هەر ستراتیژییەک بە جیا سیگناڵ دەنێرێت. WAIT نانێردرێت.\n"
         "⚠️ بۆتەکە تەنها شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات."
     )
 
@@ -935,11 +935,10 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
     if not CHAT_ID:
         return
     try:
-        m15, h1, h4 = await asyncio.gather(
-            asyncio.to_thread(get_candles, "15m"),
-            asyncio.to_thread(get_candles, "1h"),
-            asyncio.to_thread(get_candles, "4h"),
-        )
+        # Use the shared HTTP session sequentially to avoid concurrent Session access.
+        m15 = await asyncio.to_thread(get_candles, "15m")
+        h1 = await asyncio.to_thread(get_candles, "1h")
+        h4 = await asyncio.to_thread(get_candles, "4h")
         candidates = await asyncio.to_thread(independent_signal_candidates, m15, h1, h4)
         fundamental_ok, fundamental_status, _ = await asyncio.to_thread(fundamental_news_guard)
         if not fundamental_ok:
