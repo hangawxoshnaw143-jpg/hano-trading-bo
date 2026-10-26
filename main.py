@@ -580,6 +580,7 @@ def format_independent_signal(candidate, fundamental_status):
         f"🚦 سیگناڵ: {candidate['direction']}\n"
         f"🧠 ستراتیژی: {candidate['strategy']}\n"
         "⏱️ تایمفریم: M15 (شمعی تەواوبوو)\n"
+        f"📊 ئاراستەی تایمفریمە گەورەکان (تەنها زانیاری): H4={candidate['h4_trend']} | H1={candidate['h1_trend']}\n"
         f"🕯️ کاتی پشتڕاستکردنەوە (UTC): {candidate['candle_time']}\n"
         f"💵 Entry: {money(candidate['entry'])}\n"
         f"🛑 Stop Loss: {money(candidate['sl'])}\n"
