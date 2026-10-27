@@ -2,19 +2,25 @@
 
 Telegram bot for BTC/USD analysis and confirmed-signal alerts. It never places trades automatically.
 
-## Market data and analysis
+## Market data and strategy
 - Kraken public OHLC data for XBT/USD, displayed as BTC/USD.
 - Uses completed candles across H4, H1 and M15.
-- EMA20/EMA50 trend, RSI(14), ATR(14), recent support/resistance, market-structure/BOS checks, three-candle FVG, volume versus its 20-candle average, and weighted BUY/SELL scoring.
-- Additional heuristic clues: liquidity sweeps, MSS/BOS-style swing breaks, recent opposite-candle Order Block candidates, approximate ADX, and a PO3-style range clue.
-- These ICT/SMC-style detections are simplified code heuristics, not canonical or independently validated pattern recognition. PO3 is informational only and is not double-counted as a separate score.
-- Entry/SL/TP are indicative calculations from the last completed M15 close and ATR/support/resistance. They are not a guarantee, and entry can differ from live price.
+- The primary M15 trigger is the supplied **Liquidity Entry Zones** workflow:
+  1. Store recent confirmed swing highs/lows as liquidity levels.
+  2. Detect a sweep beyond a stored level by at least 0.10 ATR.
+  3. Require reclaim/close back inside the level.
+  4. Require wick >= 35%, body <= 65%, and candle range >= 0.20 ATR.
+  5. Keep the sweep valid for up to 2 completed candles.
+  6. Require directional candle body, price on the correct side of EMA50, and a break of the sweep candle midpoint.
+  7. Entry = completed M15 close; SL = 1.5 ATR; TP = 3R.
+- H4/H1 provide higher-timeframe context. FVG, MSS/BOS and PO3 remain supporting context rather than automatic standalone entries.
+- Signals are confirmed on completed candles only. WAIT is not a trade alert.
 
 ## News filter
 - Reads RSS headlines from the Federal Reserve, BLS and CoinDesk, with caching.
 - A matching recent macro headline can block BUY/SELL temporarily.
-- If every RSS feed is unreachable, the bot explicitly marks analysis as technical-only; it does not silently pretend news was checked.
-- RSS headline matching is not a complete economic calendar, does not measure surprise versus consensus, and can miss events. Check the official calendar before trading.
+- If every RSS feed is unreachable, the bot explicitly marks analysis as technical-only.
+- RSS headline matching is not a complete economic calendar and does not measure surprise versus consensus.
 
 ## Railway environment variables
 - `TELEGRAM_BOT_TOKEN` — Telegram BotFather token (secret).
@@ -27,16 +33,10 @@ Telegram bot for BTC/USD analysis and confirmed-signal alerts. It never places t
 - `/signal`
 
 ## Automatic alerts
-The watcher checks regularly and sends BUY/SELL only when a new completed M15 candle has a qualifying signal. WAIT is not sent as a trade alert. The watcher suppresses the initial alert after process startup to avoid sending an old signal immediately. Its deduplication baseline is held in memory; after restarts, behavior can repeat or skip an alert depending on candle timing.
+The watcher checks regularly and sends BUY/SELL only when a new completed M15 candle has a qualifying Liquidity Entry Zones setup. WAIT is not sent as a trade alert. The first scan after startup establishes a baseline and does not send an old signal.
 
 ## Deployment and validation
 - Railway is configured as a single-replica worker using `Procfile` (`worker: python main.py`).
-- Only one process may poll Telegram updates for this bot token. A `telegram.error.Conflict: terminated by other getUpdates request` means another process is polling with the same token. Check any old Railway/Replit/Codespaces/Termux instance before restarting.
-- Runtime health and successful deployment do not prove that signal strategy is profitable. Backtest with historical data and verify alerts in MT5 Demo before relying on them.
+- Only one process may poll Telegram updates for this bot token. A `telegram.error.Conflict: terminated by other getUpdates request` means another process is polling with the same token.
+- Runtime health and successful deployment do not prove that the strategy is profitable. Backtest and verify alerts on MT5 Demo before relying on them.
 - The bot does not place orders or connect to MT5.
-
-
-## Signal-message safety
-- A WAIT result is formatted as `WAIT — NO ACTIVE TRADE`; any associated entry/TP/SL values are explicitly labelled indicative and not confirmed. Do not trade a WAIT plan.
-- Confirmed BUY/SELL compact messages continue to show the signal entry, stop loss and take profit.
-- A Telegram polling conflict cannot be fixed safely by changing the formatter: stop every other process using the same bot token and keep only one polling instance active.
