@@ -143,148 +143,185 @@ TP_RR = 3.0
 
 
 def detect_liquidity_entry(candles):
-    """Reproduce the supplied Pine workflow on completed M15 candles.
+    """Bar-by-bar port of the supplied Pine Script's confirmed M15 logic.
 
-    1. Confirm swing highs/lows.
-    2. Keep recent liquidity levels.
-    3. Detect a minimum 0.10 ATR sweep.
-    4. Require close back inside the level plus wick/body/range quality.
-    5. Keep the sweep pending for two candles.
-    6. Confirm with directional body, EMA and sweep-candle midpoint break.
+    Replays completed candles in chronological order so pivot confirmation,
+    pending sweeps, signal cooldown, and the optional one-active-trade rule
+    behave like the TradingView indicator rather than checking only the latest
+    few candles.
     """
     if len(candles) < 80:
         return None
 
-    atr_now = atr(candles, 14)
-    if atr_now <= 0:
-        return None
-    ema_now = ema([c["close"] for c in candles[-120:]], EMA_LENGTH)
+    levels_high, levels_low = [], []
+    pending_bull = None
+    pending_bear = None
+    last_signal_i = None
+    position = 0
+    trade_entry = trade_sl = trade_tp = None
+    trade_entry_i = None
+    latest_signal = None
 
-    highs, lows = swing_points(candles[-180:], PIVOT_LENGTH, PIVOT_LENGTH)
-    high_levels = [(i, p) for i, p in highs[-STORED_LEVELS:]]
-    low_levels = [(i, p) for i, p in lows[-STORED_LEVELS:]]
-
-    # Work on the last completed candle and the preceding two candles.
-    last = candles[-1]
-    last_i = len(candles) - 1
-    candidates = []
-
-    def quality(c, wick_pct):
+    closes = [c["close"] for c in candles]
+    # Pine ta.ema/ta.atr are evaluated as a series; use trailing series values
+    # at each bar, only from candles available at that point.
+    for i in range(len(candles)):
+        # EMA50 needs at least 50 closes before it can be evaluated.
+        if i < EMA_LENGTH - 1:
+            continue
+        history = candles[:i + 1]
+        atr_now = atr(history, 14)
+        if atr_now <= 0:
+            continue
+        ema_now = ema(closes[:i + 1], EMA_LENGTH)
+        c = candles[i]
         rng = c["high"] - c["low"]
-        body = abs(c["close"] - c["open"])
-        body_pct = body / rng if rng else 0.0
-        range_atr = rng / atr_now if atr_now else 0.0
-        return wick_pct >= MIN_WICK_PCT and body_pct <= MAX_BODY_PCT and range_atr >= MIN_RANGE_ATR
+        if rng <= 0:
+            upper_pct = lower_pct = body_pct = 0.0
+        else:
+            upper_pct = (c["high"] - max(c["open"], c["close"])) / rng
+            lower_pct = (min(c["open"], c["close"]) - c["low"]) / rng
+            body_pct = abs(c["close"] - c["open"]) / rng
+        range_atr = rng / atr_now
+        sweep_distance = MIN_SWEEP_ATR * atr_now
 
-    # Search levels from newest to oldest. A pivot is eligible only before the current bar.
-    for pivot_i, level in reversed(high_levels):
-        if pivot_i >= last_i or last["high"] <= level:
-            continue
-        if last["high"] - level < MIN_SWEEP_ATR * atr_now:
-            continue
-        rng = last["high"] - last["low"]
-        upper = last["high"] - max(last["open"], last["close"])
-        upper_pct = upper / rng if rng else 0.0
-        if last["close"] < level and quality(last, upper_pct):
-            candidates.append(("SELL", pivot_i, level, last_i))
-            break
+        # ta.pivothigh/low becomes known only after right-side candles close.
+        center = i - PIVOT_LENGTH
+        if center >= PIVOT_LENGTH:
+            window = candles[center - PIVOT_LENGTH:center + PIVOT_LENGTH + 1]
+            center_candle = candles[center]
+            highs = [x["high"] for x in window]
+            lows = [x["low"] for x in window]
+            if (center_candle["high"] == max(highs)
+                    and highs.count(center_candle["high"]) == 1):
+                levels_high.append((center, center_candle["high"]))
+                if len(levels_high) > STORED_LEVELS:
+                    levels_high.pop(0)
+            if (center_candle["low"] == min(lows)
+                    and lows.count(center_candle["low"]) == 1):
+                levels_low.append((center, center_candle["low"]))
+                if len(levels_low) > STORED_LEVELS:
+                    levels_low.pop(0)
 
-    for pivot_i, level in reversed(low_levels):
-        if pivot_i >= last_i or last["low"] >= level:
-            continue
-        if level - last["low"] < MIN_SWEEP_ATR * atr_now:
-            continue
-        rng = last["high"] - last["low"]
-        lower = min(last["open"], last["close"]) - last["low"]
-        lower_pct = lower / rng if rng else 0.0
-        if last["close"] > level and quality(last, lower_pct):
-            candidates.append(("BUY", pivot_i, level, last_i))
-            break
+        # Find the newest eligible swept high/low, matching Pine's reverse scan.
+        swept_high = None
+        for pivot_i, level in reversed(levels_high):
+            if pivot_i < i and c["high"] > level and c["high"] - level >= sweep_distance:
+                swept_high = level
+                break
+        swept_low = None
+        for pivot_i, level in reversed(levels_low):
+            if pivot_i < i and c["low"] < level and level - c["low"] >= sweep_distance:
+                swept_low = level
+                break
 
-    # Check current sweep first; otherwise check a sweep in the prior two bars.
-    sweeps = candidates[:]
-    for back in range(1, CONFIRMATION_WINDOW + 1):
-        idx = last_i - back
-        if idx < 1:
-            continue
-        c = candles[idx]
-        past = candles[:idx]
-        if len(past) < 20:
-            continue
-        local_atr = atr(candles[:idx + 1], 14)
-        if local_atr <= 0:
-            continue
-        highs2, lows2 = swing_points(candles[max(0, idx - 180):idx], PIVOT_LENGTH, PIVOT_LENGTH)
-        for _, level in reversed([x for x in highs2[-STORED_LEVELS:]]):
-            if c["high"] > level and c["high"] - level >= MIN_SWEEP_ATR * local_atr:
-                rng = c["high"] - c["low"]
-                wick = c["high"] - max(c["open"], c["close"])
-                if c["close"] < level and quality(c, wick / rng if rng else 0):
-                    sweeps.append(("SELL", idx, level, idx))
-                    break
-        for _, level in reversed([x for x in lows2[-STORED_LEVELS:]]):
-            if c["low"] < level and level - c["low"] >= MIN_SWEEP_ATR * local_atr:
-                rng = c["high"] - c["low"]
-                wick = min(c["open"], c["close"]) - c["low"]
-                if c["close"] > level and quality(c, wick / rng if rng else 0):
-                    sweeps.append(("BUY", idx, level, idx))
-                    break
+        bull_reclaim = swept_low is not None and c["close"] > swept_low
+        bear_reclaim = swept_high is not None and c["close"] < swept_high
+        quality_ok = body_pct <= MAX_BODY_PCT and range_atr >= MIN_RANGE_ATR
 
-    if not sweeps:
+        valid_buy_sweep = (
+            bull_reclaim and lower_pct >= MIN_WICK_PCT and quality_ok
+        )
+        valid_sell_sweep = (
+            bear_reclaim and upper_pct >= MIN_WICK_PCT and quality_ok
+        )
+
+        if valid_buy_sweep:
+            pending_bull = {
+                "bar": i, "high": c["high"], "low": c["low"],
+                "mid": (c["high"] + c["low"]) / 2,
+                "level": swept_low, "wick_pct": lower_pct,
+                "body_pct": body_pct, "range_atr": range_atr,
+                "ema_ok": c["close"] > ema_now,
+                "mid_ok": c["close"] > (c["high"] + c["low"]) / 2,
+            }
+        if valid_sell_sweep:
+            pending_bear = {
+                "bar": i, "high": c["high"], "low": c["low"],
+                "mid": (c["high"] + c["low"]) / 2,
+                "level": swept_high, "wick_pct": upper_pct,
+                "body_pct": body_pct, "range_atr": range_atr,
+                "ema_ok": c["close"] < ema_now,
+                "mid_ok": c["close"] < (c["high"] + c["low"]) / 2,
+            }
+
+        bull_open = pending_bull is not None and i - pending_bull["bar"] <= CONFIRMATION_WINDOW
+        bear_open = pending_bear is not None and i - pending_bear["bar"] <= CONFIRMATION_WINDOW
+        buy_confirmed = (
+            bull_open and c["close"] > c["open"]
+            and c["close"] > ema_now and c["close"] > pending_bull["mid"]
+        )
+        sell_confirmed = (
+            bear_open and c["close"] < c["open"]
+            and c["close"] < ema_now and c["close"] < pending_bear["mid"]
+        )
+
+        cooldown_passed = last_signal_i is None or i - last_signal_i > COOLDOWN_BARS
+        buy_signal = buy_confirmed and cooldown_passed
+        sell_signal = sell_confirmed and cooldown_passed and not buy_signal
+
+        # Pine's internal simulation prioritizes SL if SL and TP are touched
+        # in the same candle, and ignores exits on the entry candle itself.
+        if position != 0 and trade_entry_i is not None and i > trade_entry_i:
+            if position == 1:
+                sl_hit, tp_hit = c["low"] <= trade_sl, c["high"] >= trade_tp
+            else:
+                sl_hit, tp_hit = c["high"] >= trade_sl, c["low"] <= trade_tp
+            if sl_hit or tp_hit:
+                position = 0
+                trade_entry = trade_sl = trade_tp = None
+                trade_entry_i = None
+
+        # When simulation is enabled and a projected trade is active, Pine blocks
+        # fresh signals. This script keeps that default behavior.
+        if position != 0:
+            buy_signal = sell_signal = False
+
+        if buy_signal or sell_signal:
+            direction = "BUY" if buy_signal else "SELL"
+            sweep = pending_bull if buy_signal else pending_bear
+            score_wick = sweep["wick_pct"]
+            score_body = sweep["body_pct"]
+            score_range = sweep["range_atr"]
+            wick_score = min(32.0, score_wick / MIN_WICK_PCT * 32.0)
+            body_score = min(24.0, max(0.0, (MAX_BODY_PCT - score_body) / MAX_BODY_PCT) * 24.0)
+            range_score = min(18.0, score_range / MIN_RANGE_ATR * 18.0)
+            score = min(100.0, wick_score + body_score + range_score
+                        + (10.0 if sweep["ema_ok"] else 0.0)
+                        + 10.0
+                        + (6.0 if sweep["mid_ok"] else 0.0))
+            entry = c["close"]
+            stop_distance = atr_now * SL_ATR
+            sl = entry - stop_distance if direction == "BUY" else entry + stop_distance
+            tp = entry + stop_distance * TP_RR if direction == "BUY" else entry - stop_distance * TP_RR
+            signal_data = {
+                "direction": direction, "entry": entry, "sl": sl, "tp": tp,
+                "rr": TP_RR, "score": score, "sweep_level": sweep["level"],
+                "sweep_bar": sweep["bar"], "bars_after": i - sweep["bar"],
+                "ema": ema_now, "atr": atr_now,
+                "reason": (
+                    f"Liquidity sweep + reclaim + candle quality + EMA50 + "
+                    f"midpoint confirmation; score {score:.0f}/100"
+                ),
+                "signal_bar": i,
+            }
+            last_signal_i = i
+            latest_signal = signal_data
+            position = 1 if direction == "BUY" else -1
+            trade_entry, trade_sl, trade_tp = entry, sl, tp
+            trade_entry_i = i
+
+        if pending_bull is not None and (buy_signal or i - pending_bull["bar"] > CONFIRMATION_WINDOW):
+            pending_bull = None
+        if pending_bear is not None and (sell_signal or i - pending_bear["bar"] > CONFIRMATION_WINDOW):
+            pending_bear = None
+
+    # Return only a signal confirmed on the newest completed candle; don't replay
+    # old historical entries as if they were fresh signals.
+    if latest_signal is None or latest_signal["signal_bar"] != len(candles) - 1:
         return None
-
-    # Most recent sweep wins.
-    direction, sweep_i, level, _ = sorted(sweeps, key=lambda x: x[1], reverse=True)[0]
-    bars_after = last_i - sweep_i
-    if bars_after > CONFIRMATION_WINDOW:
-        return None
-
-    sweep = candles[sweep_i]
-    mid = (sweep["high"] + sweep["low"]) / 2.0
-    close = last["close"]
-    body_ok = close > last["open"] if direction == "BUY" else close < last["open"]
-    ema_ok = close > ema_now if direction == "BUY" else close < ema_now
-    mid_ok = close > mid if direction == "BUY" else close < mid
-
-    if not (body_ok and ema_ok and mid_ok):
-        return None
-
-    # Avoid firing repeatedly on the same sweep. The confirmation must be a later bar
-    # unless the sweep candle itself already satisfies the confirmation rules.
-    score = 0.0
-    rng = sweep["high"] - sweep["low"]
-    body = abs(sweep["close"] - sweep["open"])
-    wick = (min(sweep["open"], sweep["close"]) - sweep["low"]) if direction == "BUY" else (sweep["high"] - max(sweep["open"], sweep["close"]))
-    wick_pct = wick / rng if rng else 0.0
-    body_pct = body / rng if rng else 0.0
-    range_atr = rng / atr_now if atr_now else 0.0
-    score += min(32.0, (wick_pct / MIN_WICK_PCT) * 32.0)
-    score += min(24.0, max(0.0, (MAX_BODY_PCT - body_pct) / MAX_BODY_PCT) * 24.0)
-    score += min(18.0, (range_atr / MIN_RANGE_ATR) * 18.0)
-    score += 10.0 if ema_ok else 0.0
-    score += 10.0
-    score += 6.0 if mid_ok else 0.0
-    score = min(100.0, score)
-
-    entry = close
-    sl = entry - SL_ATR * atr_now if direction == "BUY" else entry + SL_ATR * atr_now
-    tp = entry + TP_RR * (entry - sl) if direction == "BUY" else entry - TP_RR * (sl - entry)
-
-    return {
-        "direction": direction,
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
-        "rr": TP_RR,
-        "score": score,
-        "sweep_level": level,
-        "sweep_bar": sweep_i,
-        "bars_after": bars_after,
-        "ema": ema_now,
-        "atr": atr_now,
-        "reason": f"Liquidity sweep + reclaim + candle quality + EMA50 + midpoint confirmation; score {score:.0f}/100"
-    }
-
+    latest_signal.pop("signal_bar", None)
+    return latest_signal
 
 def detect_fvg(candles):
     if len(candles) < 3:
