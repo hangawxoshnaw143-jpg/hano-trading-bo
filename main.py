@@ -172,7 +172,7 @@ def detect_liquidity_entry(candles):
         atr_now = atr(history, 14)
         if atr_now <= 0:
             continue
-        ema_now = ema(closes[max(0, i - 119):i + 1], EMA_LENGTH)
+        ema_now = ema(closes[:i + 1], EMA_LENGTH)
         c = candles[i]
         rng = c["high"] - c["low"]
         if rng <= 0:
