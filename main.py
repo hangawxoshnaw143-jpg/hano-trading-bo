@@ -166,7 +166,8 @@ def detect_liquidity_entry(candles):
     # Pine ta.ema/ta.atr are evaluated as a series; use trailing series values
     # at each bar, only from candles available at that point.
     for i in range(len(candles)):
-        if i < 20:
+        # EMA50 needs at least 50 closes before it can be evaluated.
+        if i < EMA_LENGTH - 1:
             continue
         history = candles[:i + 1]
         atr_now = atr(history, 14)
