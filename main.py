@@ -1,74 +1,8 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timezone
-
 import time
-
-NEWS_GUARD_FEEDS = [
-    "https://www.federalreserve.gov/feeds/press_all.xml",
-    "https://www.bls.gov/feed/cpi.rss",
-    "https://www.bls.gov/feed/empsit.rss",
-    "https://www.bls.gov/feed/bls_latest.rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-]
-NEWS_CACHE_SECONDS = 300
-NEWS_EVENT_WINDOW_MINUTES = 90
-_NEWS_CACHE = {"checked": 0.0, "allowed": False, "status": "News not checked", "items": []}
-_NEWS_TERMS = (
-    "fomc", "federal reserve", "fed rate", "interest rate decision", "rate decision",
-    "consumer price index", "cpi", "inflation", "nonfarm payroll", "payrolls",
-    "employment situation", "unemployment rate", "jobs report", "personal consumption expenditures",
-    "pce price", "gross domestic product", "gdp", "powell", "monetary policy",
-)
-
-def fundamental_news_guard():
-    """Conservative event-risk guard; checks recent headlines, not macro surprise or sentiment."""
-    now_mono = time.monotonic()
-    if now_mono - _NEWS_CACHE["checked"] < NEWS_CACHE_SECONDS:
-        return _NEWS_CACHE["allowed"], _NEWS_CACHE["status"], list(_NEWS_CACHE["items"])
-    now = datetime.now(timezone.utc)
-    recent = []
-    sources_ok = 0
-    seen = set()
-    for url in NEWS_GUARD_FEEDS:
-        try:
-            response = HTTP.get(url, timeout=HTTP_TIMEOUT)
-            response.raise_for_status()
-            parsed = feedparser.parse(response.content)
-            if getattr(parsed, "bozo", False) and not parsed.entries:
-                continue
-            sources_ok += 1
-            for entry in parsed.entries[:15]:
-                title = str(getattr(entry, "title", "") or "").strip()
-                if not title or title.casefold() in seen:
-                    continue
-                seen.add(title.casefold())
-                if not any(term in title.casefold() for term in _NEWS_TERMS):
-                    continue
-                published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
-                if not published:
-                    continue
-                try:
-                    published_at = datetime(*published[:6], tzinfo=timezone.utc)
-                except (TypeError, ValueError):
-                    continue
-                age = (now - published_at).total_seconds()
-                if -300 <= age <= NEWS_EVENT_WINDOW_MINUTES * 60:
-                    recent.append(title)
-        except Exception as exc:
-            log.warning("Fundamental RSS feed unavailable (%s): %s", url, exc)
-    if sources_ok == 0:
-        # Do not silently suppress every technical signal just because an RSS provider is down.
-        # Make the missing news verification explicit so the user can choose whether to trade.
-        allowed, status = True, "WARNING: fundamental-news feeds unavailable; signal is technical-only"
-    elif recent:
-        allowed, status = False, "BLOCKED: recent high-impact USD/macro headline; wait for volatility to settle"
-    else:
-        allowed, status = True, "CLEAR: RSS sources reachable; no matching high-impact headline in the last 90 minutes"
-    _NEWS_CACHE.update({"checked": now_mono, "allowed": allowed, "status": status, "items": recent[:5]})
-    return allowed, status, list(recent[:5])
-
+from datetime import datetime, timezone
 
 import requests
 import feedparser
@@ -84,155 +18,272 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WATCH_INTERVAL = max(30, int(os.getenv("WATCH_INTERVAL_SECONDS", "60")))
 KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
-RSS_FEEDS = [
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+HTTP_TIMEOUT = 15
+HTTP = requests.Session()
+HTTP.headers.update({"User-Agent": "HANO-BTC-AI/3.0"})
+
+NEWS_FEEDS = [
     "https://www.federalreserve.gov/feeds/press_all.xml",
     "https://www.bls.gov/feed/cpi.rss",
     "https://www.bls.gov/feed/empsit.rss",
     "https://www.bls.gov/feed/bls_latest.rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
 ]
-HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "HANO-BTC-AI/2.0"})
-HTTP_TIMEOUT = 15
+NEWS_TERMS = (
+    "fomc", "federal reserve", "fed rate", "interest rate decision", "rate decision",
+    "consumer price index", "cpi", "inflation", "nonfarm payroll", "payrolls",
+    "employment situation", "unemployment rate", "jobs report", "pce", "gdp",
+    "powell", "monetary policy"
+)
+NEWS_CACHE = {"checked": 0.0, "allowed": True, "status": "News not checked", "items": []}
+HEADLINES_CACHE = {"checked": 0.0, "items": []}
 
 
-def get_candles(interval="1h", limit=180):
-    """Return completed Kraken XBT/USD candles; newest API row is still open."""
+def get_candles(interval="15m", limit=240):
     minutes = {"15m": 15, "1h": 60, "4h": 240}.get(interval)
     if minutes is None:
-        raise ValueError("Unsupported candle interval")
-    response = HTTP.get(
-        KRAKEN_OHLC,
-        params={"pair": "XBTUSD", "interval": minutes},
-        timeout=HTTP_TIMEOUT,
-    )
+        raise ValueError("Unsupported interval")
+    response = HTTP.get(KRAKEN_OHLC, params={"pair": "XBTUSD", "interval": minutes}, timeout=HTTP_TIMEOUT)
     response.raise_for_status()
     payload = response.json()
     if payload.get("error"):
-        raise RuntimeError("Kraken returned an API error")
+        raise RuntimeError("Kraken API error: " + str(payload["error"]))
     result = payload.get("result", {})
-    pair_key = next((key for key in result if key != "last"), None)
-    if not pair_key:
-        raise RuntimeError("Kraken returned no BTC candle data")
-    rows = result[pair_key][:-1]
-    candles = [
-        {
-            "time": int(row[0]),
-            "open": float(row[1]),
-            "high": float(row[2]),
-            "low": float(row[3]),
-            "close": float(row[4]),
-            "volume": float(row[6]),
-        }
-        for row in rows[-limit:]
-    ]
-    if len(candles) < 60:
-        raise RuntimeError("Not enough completed BTC candles returned")
+    pair = next((k for k in result if k != "last"), None)
+    if not pair:
+        raise RuntimeError("Kraken returned no BTC candles")
+    rows = result[pair][:-1]  # completed candles only
+    candles = [{
+        "time": int(r[0]), "open": float(r[1]), "high": float(r[2]),
+        "low": float(r[3]), "close": float(r[4]), "volume": float(r[6])
+    } for r in rows[-limit:]]
+    if len(candles) < 80:
+        raise RuntimeError("Not enough completed BTC candles")
     return candles
 
 
 def ema(values, period):
     if len(values) < period:
         raise ValueError("Not enough values for EMA")
-    alpha = 2.0 / (period + 1)
+    a = 2.0 / (period + 1)
     value = sum(values[:period]) / period
-    for item in values[period:]:
-        value = alpha * item + (1 - alpha) * value
+    for x in values[period:]:
+        value = a * x + (1 - a) * value
     return value
 
 
 def rsi(values, period=14):
     if len(values) <= period:
-        raise ValueError("Not enough values for RSI")
+        return 50.0
     changes = [values[i] - values[i - 1] for i in range(1, len(values))]
-    gains = [max(change, 0.0) for change in changes]
-    losses = [max(-change, 0.0) for change in changes]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+    gains = [max(x, 0.0) for x in changes]
+    losses = [max(-x, 0.0) for x in changes]
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
     for i in range(period, len(changes)):
-        avg_gain = ((period - 1) * avg_gain + gains[i]) / period
-        avg_loss = ((period - 1) * avg_loss + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+        ag = ((period - 1) * ag + gains[i]) / period
+        al = ((period - 1) * al + losses[i]) / period
+    if al == 0:
+        return 100.0 if ag else 50.0
+    return 100.0 - 100.0 / (1.0 + ag / al)
 
 
 def atr(candles, period=14):
     if len(candles) <= period:
-        raise ValueError("Not enough candles for ATR")
-    ranges = []
+        return 0.0
+    tr = []
     for i in range(1, len(candles)):
-        candle = candles[i]
-        prev_close = candles[i - 1]["close"]
-        ranges.append(max(
-            candle["high"] - candle["low"],
-            abs(candle["high"] - prev_close),
-            abs(candle["low"] - prev_close),
-        ))
-    value = sum(ranges[:period]) / period
-    for item in ranges[period:]:
-        value = ((period - 1) * value + item) / period
+        c, p = candles[i], candles[i - 1]
+        tr.append(max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"])))
+    value = sum(tr[:period]) / period
+    for x in tr[period:]:
+        value = ((period - 1) * value + x) / period
     return value
 
 
-def swing_points(candles, left=2, right=2):
-    """Return confirmed local swing highs/lows; right candles confirm a pivot."""
+def money(x):
+    return "USD " + format(x, ",.2f")
+
+
+def swing_points(candles, left=5, right=5):
     highs, lows = [], []
     for i in range(left, len(candles) - right):
+        c = candles[i]
         window = candles[i-left:i+right+1]
-        high, low = candles[i]["high"], candles[i]["low"]
-        if high == max(c["high"] for c in window) and sum(c["high"] == high for c in window) == 1:
-            highs.append((i, high))
-        if low == min(c["low"] for c in window) and sum(c["low"] == low for c in window) == 1:
-            lows.append((i, low))
+        if c["high"] == max(x["high"] for x in window) and sum(x["high"] == c["high"] for x in window) == 1:
+            highs.append((i, c["high"]))
+        if c["low"] == min(x["low"] for x in window) and sum(x["low"] == c["low"] for x in window) == 1:
+            lows.append((i, c["low"]))
     return highs, lows
 
 
-def market_structure(candles, lookback=20):
-    recent = candles[-(lookback + 1):-1]
+def timeframe_summary(candles):
+    closes = [c["close"] for c in candles]
+    e20, e50 = ema(closes[-120:], 20), ema(closes[-160:], 50)
+    rr = rsi(closes)
+    trend = "BULLISH" if closes[-1] > e20 and e20 > e50 else "BEARISH" if closes[-1] < e20 and e20 < e50 else "MIXED"
+    return {"trend": trend, "ema20": e20, "ema50": e50, "rsi": rr, "price": closes[-1]}
+
+
+# ---------------------------------------------------------------------------
+# Liquidity Entry Zones strategy
+# Ported from the supplied TradingView Pine Script.
+# ---------------------------------------------------------------------------
+PIVOT_LENGTH = 5
+STORED_LEVELS = 20
+MIN_SWEEP_ATR = 0.10
+MIN_WICK_PCT = 0.35
+MAX_BODY_PCT = 0.65
+MIN_RANGE_ATR = 0.20
+CONFIRMATION_WINDOW = 2
+COOLDOWN_BARS = 10
+EMA_LENGTH = 50
+SL_ATR = 1.50
+TP_RR = 3.0
+
+
+def detect_liquidity_entry(candles):
+    """Reproduce the supplied Pine workflow on completed M15 candles.
+
+    1. Confirm swing highs/lows.
+    2. Keep recent liquidity levels.
+    3. Detect a minimum 0.10 ATR sweep.
+    4. Require close back inside the level plus wick/body/range quality.
+    5. Keep the sweep pending for two candles.
+    6. Confirm with directional body, EMA and sweep-candle midpoint break.
+    """
+    if len(candles) < 80:
+        return None
+
+    atr_now = atr(candles, 14)
+    if atr_now <= 0:
+        return None
+    ema_now = ema([c["close"] for c in candles[-120:]], EMA_LENGTH)
+
+    highs, lows = swing_points(candles[-180:], PIVOT_LENGTH, PIVOT_LENGTH)
+    high_levels = [(i, p) for i, p in highs[-STORED_LEVELS:]]
+    low_levels = [(i, p) for i, p in lows[-STORED_LEVELS:]]
+
+    # Work on the last completed candle and the preceding two candles.
     last = candles[-1]
-    resistance = max(c["high"] for c in recent)
-    support = min(c["low"] for c in recent)
-    highs, lows = swing_points(candles[-120:])
-    if last["close"] > resistance:
-        return "BULLISH BOS", support, resistance
-    if last["close"] < support:
-        return "BEARISH BOS", support, resistance
-    if len(highs) >= 2 and len(lows) >= 2:
-        if highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
-            return "BEARISH STRUCTURE", support, resistance
-        if highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
-            return "BULLISH STRUCTURE", support, resistance
-    return "RANGE / NEUTRAL", support, resistance
+    last_i = len(candles) - 1
+    candidates = []
 
+    def quality(c, wick_pct):
+        rng = c["high"] - c["low"]
+        body = abs(c["close"] - c["open"])
+        body_pct = body / rng if rng else 0.0
+        range_atr = rng / atr_now if atr_now else 0.0
+        return wick_pct >= MIN_WICK_PCT and body_pct <= MAX_BODY_PCT and range_atr >= MIN_RANGE_ATR
 
-def pullback_rejection_confirmed(candles, direction, left=2, right=2):
-    """Require a confirmed LH/HL pullback followed by a continuation trigger."""
-    if len(candles) < 30:
-        return False
-    window = candles[-120:]
-    highs, lows = swing_points(window, left, right)
-    # Latest pivot must be confirmed by right completed candles; do not trade the pivot itself.
-    last_confirmable_index = len(window) - right - 1
-    if len(highs) < 2 or len(lows) < 2:
-        return False
-    last, prev = window[-1], window[-2]
-    if direction == "SELL":
-        previous_high, pullback_high = highs[-2], highs[-1]
-        if pullback_high[1] >= previous_high[1] or pullback_high[0] >= last_confirmable_index:
-            return False
-        if not any(previous_high[0] < low[0] < pullback_high[0] for low in lows):
-            return False
-        return last["close"] < last["open"] and last["close"] < prev["low"] and last["close"] < pullback_high[1]
-    if direction == "BUY":
-        previous_low, pullback_low = lows[-2], lows[-1]
-        if pullback_low[1] <= previous_low[1] or pullback_low[0] >= last_confirmable_index:
-            return False
-        if not any(previous_low[0] < high[0] < pullback_low[0] for high in highs):
-            return False
-        return last["close"] > last["open"] and last["close"] > prev["high"] and last["close"] > pullback_low[1]
-    return False
+    # Search levels from newest to oldest. A pivot is eligible only before the current bar.
+    for pivot_i, level in reversed(high_levels):
+        if pivot_i >= last_i or last["high"] <= level:
+            continue
+        if last["high"] - level < MIN_SWEEP_ATR * atr_now:
+            continue
+        rng = last["high"] - last["low"]
+        upper = last["high"] - max(last["open"], last["close"])
+        upper_pct = upper / rng if rng else 0.0
+        if last["close"] < level and quality(last, upper_pct):
+            candidates.append(("SELL", pivot_i, level, last_i))
+            break
+
+    for pivot_i, level in reversed(low_levels):
+        if pivot_i >= last_i or last["low"] >= level:
+            continue
+        if level - last["low"] < MIN_SWEEP_ATR * atr_now:
+            continue
+        rng = last["high"] - last["low"]
+        lower = min(last["open"], last["close"]) - last["low"]
+        lower_pct = lower / rng if rng else 0.0
+        if last["close"] > level and quality(last, lower_pct):
+            candidates.append(("BUY", pivot_i, level, last_i))
+            break
+
+    # Check current sweep first; otherwise check a sweep in the prior two bars.
+    sweeps = candidates[:]
+    for back in range(1, CONFIRMATION_WINDOW + 1):
+        idx = last_i - back
+        if idx < 1:
+            continue
+        c = candles[idx]
+        past = candles[:idx]
+        if len(past) < 20:
+            continue
+        local_atr = atr(candles[:idx + 1], 14)
+        if local_atr <= 0:
+            continue
+        highs2, lows2 = swing_points(candles[max(0, idx - 180):idx], PIVOT_LENGTH, PIVOT_LENGTH)
+        for _, level in reversed([x for x in highs2[-STORED_LEVELS:]]):
+            if c["high"] > level and c["high"] - level >= MIN_SWEEP_ATR * local_atr:
+                rng = c["high"] - c["low"]
+                wick = c["high"] - max(c["open"], c["close"])
+                if c["close"] < level and quality(c, wick / rng if rng else 0):
+                    sweeps.append(("SELL", idx, level, idx))
+                    break
+        for _, level in reversed([x for x in lows2[-STORED_LEVELS:]]):
+            if c["low"] < level and level - c["low"] >= MIN_SWEEP_ATR * local_atr:
+                rng = c["high"] - c["low"]
+                wick = min(c["open"], c["close"]) - c["low"]
+                if c["close"] > level and quality(c, wick / rng if rng else 0):
+                    sweeps.append(("BUY", idx, level, idx))
+                    break
+
+    if not sweeps:
+        return None
+
+    # Most recent sweep wins.
+    direction, sweep_i, level, _ = sorted(sweeps, key=lambda x: x[1], reverse=True)[0]
+    bars_after = last_i - sweep_i
+    if bars_after > CONFIRMATION_WINDOW:
+        return None
+
+    sweep = candles[sweep_i]
+    mid = (sweep["high"] + sweep["low"]) / 2.0
+    close = last["close"]
+    body_ok = close > last["open"] if direction == "BUY" else close < last["open"]
+    ema_ok = close > ema_now if direction == "BUY" else close < ema_now
+    mid_ok = close > mid if direction == "BUY" else close < mid
+
+    if not (body_ok and ema_ok and mid_ok):
+        return None
+
+    # Avoid firing repeatedly on the same sweep. The confirmation must be a later bar
+    # unless the sweep candle itself already satisfies the confirmation rules.
+    score = 0.0
+    rng = sweep["high"] - sweep["low"]
+    body = abs(sweep["close"] - sweep["open"])
+    wick = (min(sweep["open"], sweep["close"]) - sweep["low"]) if direction == "BUY" else (sweep["high"] - max(sweep["open"], sweep["close"]))
+    wick_pct = wick / rng if rng else 0.0
+    body_pct = body / rng if rng else 0.0
+    range_atr = rng / atr_now if atr_now else 0.0
+    score += min(32.0, (wick_pct / MIN_WICK_PCT) * 32.0)
+    score += min(24.0, max(0.0, (MAX_BODY_PCT - body_pct) / MAX_BODY_PCT) * 24.0)
+    score += min(18.0, (range_atr / MIN_RANGE_ATR) * 18.0)
+    score += 10.0 if ema_ok else 0.0
+    score += 10.0
+    score += 6.0 if mid_ok else 0.0
+    score = min(100.0, score)
+
+    entry = close
+    sl = entry - SL_ATR * atr_now if direction == "BUY" else entry + SL_ATR * atr_now
+    tp = entry + TP_RR * (entry - sl) if direction == "BUY" else entry - TP_RR * (sl - entry)
+
+    return {
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "rr": TP_RR,
+        "score": score,
+        "sweep_level": level,
+        "sweep_bar": sweep_i,
+        "bars_after": bars_after,
+        "ema": ema_now,
+        "atr": atr_now,
+        "reason": f"Liquidity sweep + reclaim + candle quality + EMA50 + midpoint confirmation; score {score:.0f}/100"
+    }
 
 
 def detect_fvg(candles):
@@ -240,527 +291,272 @@ def detect_fvg(candles):
         return "N/A"
     a, c = candles[-3], candles[-1]
     if c["low"] > a["high"]:
-        return "BULLISH FVG: " + format(a["high"], ",.2f") + " - " + format(c["low"], ",.2f")
+        return f"BULLISH FVG: {a['high']:.2f} - {c['low']:.2f}"
     if c["high"] < a["low"]:
-        return "BEARISH FVG: " + format(c["high"], ",.2f") + " - " + format(a["low"], ",.2f")
+        return f"BEARISH FVG: {c['high']:.2f} - {a['low']:.2f}"
     return "No new FVG"
 
 
-def timeframe_summary(candles):
-    closes = [c["close"] for c in candles]
-    e20 = ema(closes[-100:], 20)
-    e50 = ema(closes[-120:], 50)
-    strength = rsi(closes)
-    if e20 > e50 and closes[-1] > e20:
-        trend = "BULLISH"
-    elif e20 < e50 and closes[-1] < e20:
-        trend = "BEARISH"
-    else:
-        trend = "MIXED"
-    return {"trend": trend, "ema20": e20, "ema50": e50, "rsi": strength, "price": closes[-1]}
-
-
-TRANSLATION_CACHE = {}
-
-def translate_to_sorani(text):
-    """Translate a headline to Central Kurdish (Sorani), caching results to avoid rate limits."""
-    if text in TRANSLATION_CACHE:
-        return TRANSLATION_CACHE[text]
-    try:
-        response = HTTP.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "auto", "tl": "ckb", "dt": "t", "q": text},
-            timeout=8,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        translated = "".join(part[0] for part in payload[0] if part and part[0])
-        result = translated.strip() or text
-        TRANSLATION_CACHE[text] = result
-        return result
-    except Exception as exc:
-        log.warning("Sorani headline translation unavailable: %s", exc)
-        TRANSLATION_CACHE[text] = text
-        return text
-
-
-HEADLINES_CACHE = {"checked": 0.0, "items": []}
-
-def headlines(limit=5):
-    if time.monotonic() - HEADLINES_CACHE["checked"] < 300:
-        return list(HEADLINES_CACHE["items"][:limit])
-    items = []
-    for url in RSS_FEEDS:
-        try:
-            response = HTTP.get(url, timeout=HTTP_TIMEOUT)
-            response.raise_for_status()
-            parsed = feedparser.parse(response.content)
-            for entry in parsed.entries[:4]:
-                title = getattr(entry, "title", "").strip()
-                if title and title not in items:
-                    items.append(title)
-        except Exception as exc:
-            log.warning("RSS feed unavailable (%s): %s", url, exc)
-    translated_items = [(title, translate_to_sorani(title)) for title in items[:limit]]
-    HEADLINES_CACHE.update({"checked": time.monotonic(), "items": translated_items})
-    return list(translated_items)
-
-
-def money(value):
-    return "USD " + format(value, ",.2f")
-
-
-
-def detect_liquidity_sweep(candles, lookback=20):
-    """Heuristic sweep: wick takes prior range liquidity, close returns inside."""
+def detect_mss(candles, lookback=40):
     if len(candles) < lookback + 2:
         return "NONE"
-    prior = candles[-(lookback + 1):-1]
+    prior = candles[-lookback-1:-1]
     last = candles[-1]
-    prior_high = max(x["high"] for x in prior)
-    prior_low = min(x["low"] for x in prior)
-    if last["high"] > prior_high and last["close"] < prior_high:
-        return "BUY-SIDE LIQUIDITY SWEPT (bearish clue)"
-    if last["low"] < prior_low and last["close"] > prior_low:
-        return "SELL-SIDE LIQUIDITY SWEPT (bullish clue)"
-    return "NONE"
-
-
-def detect_mss(candles, lookback=40):
-    """Simple close-confirmed break of recent swing; heuristic MSS, not canonical labeling."""
-    if len(candles) < lookback + 3:
-        return "NONE"
-    prior = candles[-(lookback + 1):-1]
-    last = candles[-1]
-    prior_high = max(x["high"] for x in prior)
-    prior_low = min(x["low"] for x in prior)
-    if last["close"] > prior_high:
+    hi = max(x["high"] for x in prior)
+    lo = min(x["low"] for x in prior)
+    if last["close"] > hi:
         return "BULLISH MSS/BOS"
-    if last["close"] < prior_low:
+    if last["close"] < lo:
         return "BEARISH MSS/BOS"
     return "NONE"
 
 
-def detect_order_block(candles, direction, search=12):
-    """Basic OB candidate: last opposite candle before a strong directional candle."""
-    if len(candles) < search + 2:
-        return "NONE"
+def market_structure(candles, lookback=20):
+    prior = candles[-lookback-1:-1]
     last = candles[-1]
-    recent = candles[-(search + 1):-1]
-    avg_range = sum(x["high"] - x["low"] for x in recent) / max(len(recent), 1)
-    if avg_range <= 0:
-        return "NONE"
-    if direction == "BUY":
-        if last["close"] <= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
-            return "NONE"
-        for offset, candle in enumerate(reversed(recent)):
-            if offset > 3:
-                break
-            if candle["close"] < candle["open"]:
-                return f"BULLISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
-    elif direction == "SELL":
-        if last["close"] >= last["open"] or (last["high"] - last["low"]) < 1.25 * avg_range:
-            return "NONE"
-        for offset, candle in enumerate(reversed(recent)):
-            if offset > 3:
-                break
-            if candle["close"] > candle["open"]:
-                return f"BEARISH OB CANDIDATE {candle['low']:.2f}-{candle['high']:.2f}"
-    return "NONE"
-
-
-def adx_value(candles, period=14):
-    """Wilder-style ADX estimate from completed candles."""
-    if len(candles) < period * 2 + 2:
-        return 0.0
-    tr, plus_dm, minus_dm = [], [], []
-    for i in range(1, len(candles)):
-        cur, prev = candles[i], candles[i - 1]
-        up = cur["high"] - prev["high"]
-        down = prev["low"] - cur["low"]
-        plus_dm.append(up if up > down and up > 0 else 0.0)
-        minus_dm.append(down if down > up and down > 0 else 0.0)
-        tr.append(max(cur["high"] - cur["low"], abs(cur["high"] - prev["close"]), abs(cur["low"] - prev["close"])))
-    def smooth(values):
-        out = [sum(values[:period])]
-        for val in values[period:]:
-            out.append(out[-1] - out[-1] / period + val)
-        return out
-    tr_s, p_s, m_s = smooth(tr), smooth(plus_dm), smooth(minus_dm)
-    dx = []
-    for t, p, m in zip(tr_s, p_s, m_s):
-        if t <= 0:
-            dx.append(0.0)
-        else:
-            pdi, mdi = 100 * p / t, 100 * m / t
-            dx.append(100 * abs(pdi - mdi) / (pdi + mdi) if pdi + mdi else 0.0)
-    if len(dx) < period:
-        return sum(dx) / len(dx) if dx else 0.0
-    value = sum(dx[:period]) / period
-    for item in dx[period:]:
-        value = ((period - 1) * value + item) / period
-    return value
+    support = min(x["low"] for x in prior)
+    resistance = max(x["high"] for x in prior)
+    highs, lows = swing_points(candles[-120:])
+    if last["close"] > resistance:
+        return "BULLISH BOS", support, resistance
+    if last["close"] < support:
+        return "BEARISH BOS", support, resistance
+    if len(highs) >= 2 and len(lows) >= 2:
+        if highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
+            return "BULLISH STRUCTURE", support, resistance
+        if highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
+            return "BEARISH STRUCTURE", support, resistance
+    return "RANGE / NEUTRAL", support, resistance
 
 
 def po3_phase(candles, lookback=24):
-    """Loose accumulation/manipulation/distribution clue; informational only."""
-    if len(candles) < lookback + 2:
-        return "UNKNOWN"
-    prior = candles[-(lookback + 1):-1]
+    prior = candles[-lookback-1:-1]
     last = candles[-1]
-    hi = max(x["high"] for x in prior)
-    lo = min(x["low"] for x in prior)
+    hi, lo = max(x["high"] for x in prior), min(x["low"] for x in prior)
     mid = (hi + lo) / 2
     if last["low"] < lo and last["close"] > lo:
         return "PO3 bullish manipulation/reclaim clue"
     if last["high"] > hi and last["close"] < hi:
         return "PO3 bearish manipulation/reclaim clue"
-    if last["close"] > mid:
-        return "PO3 range upper half (not confirmation)"
-    return "PO3 range lower half (not confirmation)"
+    return "PO3 upper-half range clue" if last["close"] > mid else "PO3 lower-half range clue"
+
+
+def fundamental_news_guard():
+    now_mono = time.monotonic()
+    if now_mono - NEWS_CACHE["checked"] < 300:
+        return NEWS_CACHE["allowed"], NEWS_CACHE["status"], list(NEWS_CACHE["items"])
+    now = datetime.now(timezone.utc)
+    recent, sources_ok, seen = [], 0, set()
+    for url in NEWS_FEEDS:
+        try:
+            r = HTTP.get(url, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            parsed = feedparser.parse(r.content)
+            if getattr(parsed, "bozo", False) and not parsed.entries:
+                continue
+            sources_ok += 1
+            for entry in parsed.entries[:15]:
+                title = str(getattr(entry, "title", "") or "").strip()
+                if not title or title.casefold() in seen or not any(t in title.casefold() for t in NEWS_TERMS):
+                    continue
+                seen.add(title.casefold())
+                published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+                if not published:
+                    continue
+                try:
+                    at = datetime(*published[:6], tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                age = (now - at).total_seconds()
+                if -300 <= age <= 90 * 60:
+                    recent.append(title)
+        except Exception as exc:
+            log.warning("News feed unavailable %s: %s", url, exc)
+    if sources_ok == 0:
+        allowed, status = True, "WARNING: news feeds unavailable; technical-only"
+    elif recent:
+        allowed, status = False, "BLOCKED: recent USD/macro headline"
+    else:
+        allowed, status = True, "CLEAR: no matching high-impact headline in last 90 minutes"
+    NEWS_CACHE.update({"checked": now_mono, "allowed": allowed, "status": status, "items": recent[:5]})
+    return allowed, status, list(recent[:5])
+
+
+def headlines(limit=5):
+    if time.monotonic() - HEADLINES_CACHE["checked"] < 300:
+        return list(HEADLINES_CACHE["items"][:limit])
+    items = []
+    for url in NEWS_FEEDS:
+        try:
+            r = HTTP.get(url, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            parsed = feedparser.parse(r.content)
+            for e in parsed.entries[:4]:
+                title = str(getattr(e, "title", "") or "").strip()
+                if title and title not in items:
+                    items.append(title)
+        except Exception:
+            continue
+    HEADLINES_CACHE.update({"checked": time.monotonic(), "items": items[:limit]})
+    return list(items[:limit])
+
 
 def analyze():
-    h4 = get_candles("4h")
-    h1 = get_candles("1h")
-    m15 = get_candles("15m")
+    h4, h1, m15 = get_candles("4h"), get_candles("1h"), get_candles("15m")
     s4, s1, s15 = timeframe_summary(h4), timeframe_summary(h1), timeframe_summary(m15)
     price = s15["price"]
     structure, support, resistance = market_structure(m15)
     volatility = atr(m15)
+    fvg, mss, po3 = detect_fvg(m15), detect_mss(m15), po3_phase(m15)
     volume_avg = sum(c["volume"] for c in m15[-21:-1]) / 20
-    volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg > 0 else 0
-    fvg = detect_fvg(m15)
-    liquidity = detect_liquidity_sweep(m15)
-    mss = detect_mss(m15)
-    bullish_ob = detect_order_block(m15, "BUY")
-    bearish_ob = detect_order_block(m15, "SELL")
-    adx = adx_value(m15)
-    po3 = po3_phase(m15)
+    volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg else 0.0
+    setup = detect_liquidity_entry(m15)
+    news_ok, news_status, impact = fundamental_news_guard()
 
-    # Weighted confirmation model: higher timeframes guide direction, but do not all
-    # have to align. Pullback rejection is supportive evidence, not a mandatory gate.
-    buy_score = 0
-    sell_score = 0
+    # Higher timeframes are context; the supplied Liquidity Entry Zones rules are the
+    # actual M15 trigger. This avoids turning every EMA/FVG clue into a signal.
+    direction = setup["direction"] if setup and news_ok else "WAIT"
+    if setup and not news_ok:
+        reason = news_status
+    elif setup:
+        reason = setup["reason"]
+    else:
+        reason = "No confirmed liquidity-sweep/reclaim setup inside the confirmation window."
 
-    for summary, weight in ((s4, 1), (s1, 2), (s15, 2)):
-        if summary["trend"] == "BULLISH":
-            buy_score += weight
-        elif summary["trend"] == "BEARISH":
-            sell_score += weight
-
-    if 45 <= s15["rsi"] <= 72:
-        buy_score += 1
-    elif s15["rsi"] < 35 or s15["rsi"] > 78:
-        buy_score -= 1
-    if 28 <= s15["rsi"] <= 55:
-        sell_score += 1
-    elif s15["rsi"] < 22 or s15["rsi"] > 65:
-        sell_score -= 1
-
-    if structure in ("BULLISH BOS", "BULLISH STRUCTURE"):
-        buy_score += 2
-    elif structure in ("BEARISH BOS", "BEARISH STRUCTURE"):
-        sell_score += 2
-
-    if pullback_rejection_confirmed(m15, "BUY"):
-        buy_score += 1
-    if pullback_rejection_confirmed(m15, "SELL"):
-        sell_score += 1
-    if fvg.startswith("BULLISH FVG"):
-        buy_score += 1
-    elif fvg.startswith("BEARISH FVG"):
-        sell_score += 1
-    if volume_ratio >= 1.10:
-        if m15[-1]["close"] > m15[-1]["open"]:
-            buy_score += 1
-        elif m15[-1]["close"] < m15[-1]["open"]:
-            sell_score += 1
-
-    # Extra SMC/ICT-style clues. These are heuristic confirmations, never standalone entries.
-    if "SELL-SIDE LIQUIDITY SWEPT" in liquidity or mss == "BULLISH MSS/BOS":
-        buy_score += 1
-    if "BUY-SIDE LIQUIDITY SWEPT" in liquidity or mss == "BEARISH MSS/BOS":
-        sell_score += 1
-    if bullish_ob.startswith("BULLISH OB"):
-        buy_score += 1
-    if bearish_ob.startswith("BEARISH OB"):
-        sell_score += 1
-    if adx >= 20:
-        if s15["trend"] == "BULLISH":
-            buy_score += 1
-        elif s15["trend"] == "BEARISH":
-            sell_score += 1
-    # PO3 clue is displayed for context only; do not double-count the same sweep.
-
-    # Calibrated for more valid opportunities while retaining score separation.
-    # This remains a heuristic; validate on historical data and demo before live use.
-    buy_ok = buy_score >= 4 and buy_score >= sell_score + 1
-    sell_ok = sell_score >= 4 and sell_score >= buy_score + 1
-
-    fundamental_ok, fundamental_status, impact_headlines = fundamental_news_guard()
-    if not fundamental_ok:
-        buy_ok = False
-        sell_ok = False
-
-    direction, reason = "WAIT", (
-        fundamental_status if not fundamental_ok
-        else f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}؛ نمرەی پێویست 4 و جیاوازی لانیکەم 1 ـە."
-    )
-    entry = sl = tp = None
-    if buy_ok:
-        direction = "BUY"
-        reason = f"BUY: نمرە {buy_score}؛ پێکهاتە={structure}؛ liquidity={liquidity}؛ MSS/BOS={mss}؛ ADX={adx:.1f}."
-        entry = price
-        sl = min(price - 1.5 * volatility, support - 0.15 * volatility)
-        tp = entry + 2.0 * (entry - sl)
-    elif sell_ok:
-        direction = "SELL"
-        reason = f"SELL: نمرە {sell_score}؛ پێکهاتە={structure}؛ liquidity={liquidity}؛ MSS/BOS={mss}؛ ADX={adx:.1f}."
-        entry = price
-        sl = max(price + 1.5 * volatility, resistance + 0.15 * volatility)
-        tp = entry - 2.0 * (sl - entry)
+    entry = setup["entry"] if setup and news_ok else None
+    sl = setup["sl"] if setup and news_ok else None
+    tp = setup["tp"] if setup and news_ok else None
 
     candle_time = datetime.fromtimestamp(m15[-1]["time"], timezone.utc).strftime("%Y-%m-%d %H:%M")
-    created_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    news = headlines()
-    news_text = "\n".join(
-        "• " + translated + ("\n  (Original: " + original + ")" if translated == original else "")
-        for original, translated in news
-    ) if news else "هەواڵی RSS بەردەست نییە."
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     if entry is not None:
-        risk_text = (
-            "ئاراستەی پلان: " + direction + "\n"
-            "Entry (نرخی کەندڵی M15): " + money(entry) + "\n"
-            "Stop Loss (SL): " + money(sl) + "\nTake Profit (TP): " + money(tp) + "\n"
-            "Risk/Reward ئامانج: 1:2 (خەمڵاندنی پلان، نەک دڵنیایی)"
+        risk = (
+            f"ئاراستەی پلان: {direction}\n"
+            f"Entry (M15 close): {money(entry)}\n"
+            f"Stop Loss (ATR): {money(sl)}\n"
+            f"Take Profit ({TP_RR:g}R): {money(tp)}\n"
+            f"Risk/Reward: 1:{TP_RR:g}"
         )
     else:
-        # WAIT means no active setup. Do not manufacture a directional plan from
-        # the price's position inside support/resistance; that can contradict the scores.
-        risk_text = (
-            "⚠️ WAIT — هیچ پلانی BUY/SELL نیشان نادرێت، چونکە سیگناڵ پشتڕاست نەکراوەتەوە.\n"
-            f"نمرەی BUY: {buy_score} | نمرەی SELL: {sell_score}\n"
-            "Entry / SL / TP: N/A تا کاتی پشتڕاستبوونەوەی سیگناڵ.\n"
-            "تێبینی: لەم دۆخەدا هیچ مامەڵەیەک مەکەرەوە."
-        )
+        risk = "⚠️ WAIT — هیچ پلانی BUY/SELL نییە. Entry / SL / TP = N/A"
+
+    news_text = "\n".join("• " + x for x in headlines()) or "هەواڵ بەردەست نییە."
+    sweep_text = "NONE"
+    if setup:
+        sweep_text = f"{setup['direction']} sweep @ {money(setup['sweep_level'])} | +{setup['bars_after']} bar"
+
     return (
         "🤖 HANO BTC AI | BTC/USD • KRAKEN\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 کەندڵی M15 (UTC): {candle_time}\n"
-        f"🆕 کاتی دروستکردنی شیکاری (UTC): {created_time}\n"
-        f"💵 نرخی دوا کەندڵی تەواوبوو: {money(price)}\n\n"
-        f"🎯 ئەنجام: {direction}\n"
-        f"🧠 هۆکاری سەرەکی: {reason}\n"
-        f"📰 فلتەری هەواڵ: {fundamental_status}\n"
-        + ("\n".join("⚠️ هەواڵی ماکرۆ: " + title for title in impact_headlines) + "\n" if impact_headlines else "")
+        f"🕒 M15 completed: {candle_time} UTC\n"
+        f"🆕 Analysis: {created} UTC\n"
+        f"💵 Price: {money(price)}\n\n"
+        f"🎯 SIGNAL: {direction}\n"
+        f"🧠 Reason: {reason}\n"
+        f"📰 News filter: {news_status}\n"
+        + ("⚠️ Macro: " + " | ".join(impact) + "\n" if impact else "")
         + "\n"
-        "📊 ئاراستەی تایمفریمەکان\n"
-        f"• H4: {s4['trend']} | EMA20: {money(s4['ema20'])} | EMA50: {money(s4['ema50'])}\n"
-        f"• H1: {s1['trend']} | EMA20: {money(s1['ema20'])} | EMA50: {money(s1['ema50'])} | RSI: {s1['rsi']:.1f}\n"
-        f"• M15: {s15['trend']} | RSI: {s15['rsi']:.1f}\n\n"
-        "🔎 نیشانە تەکنیکییەکان\n"
-        f"• Market Structure: {structure}\n"
+        "📊 MULTI-TIMEFRAME BIAS\n"
+        f"• H4: {s4['trend']} | EMA20 {money(s4['ema20'])} | EMA50 {money(s4['ema50'])}\n"
+        f"• H1: {s1['trend']} | EMA20 {money(s1['ema20'])} | EMA50 {money(s1['ema50'])} | RSI {s1['rsi']:.1f}\n"
+        f"• M15: {s15['trend']} | RSI {s15['rsi']:.1f}\n\n"
+        "💧 LIQUIDITY ENTRY ZONES\n"
+        f"• Sweep: {sweep_text}\n"
+        f"• Structure: {structure}\n"
+        f"• MSS/BOS: {mss}\n"
+        f"• FVG: {fvg}\n"
+        f"• PO3: {po3}\n"
         f"• Support: {money(support)}\n"
         f"• Resistance: {money(resistance)}\n"
-        f"• FVG لە M15: {fvg}\n"
-        f"• Liquidity Sweep: {liquidity}\n"
-        f"• MSS/BOS (heuristic): {mss}\n"
-        f"• Order Block BUY: {bullish_ob}\n"
-        f"• Order Block SELL: {bearish_ob}\n"
-        f"• ADX(14) خەمڵێنراو: {adx:.1f}\n"
-        f"• PO3 clue (heuristic): {po3}\n"
-
-        f"• Volumeی M15 بەرامبەر ناوەندی 20 کەندڵ: {volume_ratio:.2f}x\n"
-        f"• ATR(14) لە M15: {money(volatility)}\n\n"
-        "🛡️ پلانی مامەڵە و ڕیسک\n" + risk_text + "\n\n"
-        "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)\n" + news_text + "\n\n"
+        f"• EMA50 filter: {money(ema(m15[-120:][0:0] if False else [c['close'] for c in m15[-120:]], 50))}\n"
+        f"• Volume: {volume_ratio:.2f}x 20-candle average\n"
+        f"• ATR14: {money(volatility)}\n\n"
+        "🛡️ TRADE PLAN\n" + risk + "\n\n"
+        "📰 NEWS\n" + news_text + "\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ تەنها شیکارییە؛ بۆتەکە مامەڵە ناکات. Entry/SL/TP خەمڵاندنی پلاندانانە و دڵنیایی نییە. پێش بەکارهێنان لە Demo تاقی بکەرەوە."
+        "⚠️ تەنها شیکارییە؛ بۆتەکە هیچ مامەڵەیەکی ئۆتۆماتیکی ناکات. BUY/SELL پشتڕاستکراوەکان پێش بەکارهێنان لە Demo تاقی بکەرەوە."
     )
 
 
 def minimal_signal_message(message):
-    """Format a concise signal without presenting a WAIT plan as an active trade."""
     import re
+    def read(pattern):
+        m = re.search(pattern, message)
+        return float(m.group(1).replace(",", "")) if m else None
+    line = next((x for x in message.splitlines() if x.startswith("🎯 SIGNAL:")), "")
+    direction = line.split(":", 1)[1].strip() if ":" in line else "WAIT"
+    entry = read(r"Entry \(M15 close\): USD ([0-9,]+\.[0-9]{2})")
+    sl = read(r"Stop Loss \(ATR\): USD ([0-9,]+\.[0-9]{2})")
+    tp = read(r"Take Profit \(3R\): USD ([0-9,]+\.[0-9]{2})")
+    if direction not in ("BUY", "SELL"):
+        return "📊 Hano Trading Bot — Bitcoin\n⏱️ M15 — SCALPING\n🚦 SIGNAL: WAIT — NO ACTIVE TRADE\n💰 ENTRY: N/A\n🎯 TP: N/A\n🛑 SL: N/A\n⚠️ Do not open a trade until BUY/SELL is confirmed."
+    fmt = lambda x: format(x, ",.2f") if x is not None else "N/A"
+    return f"📊 Hano Trading Bot — Bitcoin\n⏱️ M15 — SCALPING\n🚦 SIGNAL: {direction}\n💰 ENTRY: {fmt(entry)}\n🎯 TP: {fmt(tp)}\n🛑 SL: {fmt(sl)}"
 
-    def read_price(pattern):
-        match = re.search(pattern, message)
-        if not match:
-            return None
-        try:
-            return float(match.group(1).replace(",", ""))
-        except (TypeError, ValueError):
-            return None
 
-    lines = message.splitlines()
-    outcome_line = next(
-        (line for line in lines
-         if line.startswith("🎯 ئەنجام:") or line.startswith("🚦 SIGNAL:")),
-        "",
-    )
-    outcome = outcome_line.split(":", 1)[1].strip() if ":" in outcome_line else "WAIT"
-    plan_line = next((line for line in lines if line.startswith("ئاراستەی پلان:")), "")
-    plan_direction = plan_line.split(":", 1)[1].strip() if ":" in plan_line else "N/A"
-
-    # Prefer the confirmed setup's M15 entry; otherwise use the labelled WAIT plan.
-    entry = read_price(r"Entry \(نرخی کەندڵی M15\): USD ([0-9,]+\.[0-9]{2})")
-    stop = read_price(r"Stop Loss \(SL\): USD ([0-9,]+\.[0-9]{2})")
-    target = read_price(r"Take Profit \(TP\): USD ([0-9,]+\.[0-9]{2})")
-    if entry is None:
-        entry = read_price(r"Entry: USD ([0-9,]+\.[0-9]{2})")
-
-    def price(value):
-        return format(value, ",.2f") if value is not None else "N/A"
-
-    if outcome not in ("BUY", "SELL"):
-        return (
-            "📊 Hano Trading Bot — Bitcoin\n"
-            "⏱️ Timeframe: M15 — SCALPING\n"
-            "🚦 SIGNAL: WAIT — NO ACTIVE TRADE\n"
-            "🧭 PLAN: NONE — WAIT FOR CONFIRMATION\n"
-            "💰 ENTRY: N/A\n"
-            "🎯 TP: N/A\n"
-            "🛑 SL: N/A\n"
-            "⚠️ Do not open a trade until BUY/SELL is confirmed."
-        )
-
-    return (
-        "📊 Hano Trading Bot — Bitcoin\n"
-        "⏱️ Timeframe: M15 — SCALPING\n"
-        f"🚦 SIGNAL: {outcome}\n"
-        f"💰 ENTRY: {price(entry)}\n"
-        f"🎯 TP: {price(target)}\n"
-        f"🛑 SL: {price(stop)}"
-    )
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📊 سیگناڵ", callback_data="menu_signal"),
-            InlineKeyboardButton("🧠 هۆکاری سیگناڵ", callback_data="menu_reason"),
-        ],
-        [
-            InlineKeyboardButton("🛡️ پلانی ڕیسک", callback_data="menu_risk"),
-            InlineKeyboardButton("📰 هەواڵ و فەندامێنتاڵ", callback_data="menu_news"),
-        ],
-        [
-            InlineKeyboardButton("⏱️ تایمفریمەکان", callback_data="menu_timeframes"),
-            InlineKeyboardButton("📚 فێربوون", callback_data="menu_education"),
-        ],
+        [InlineKeyboardButton("📊 سیگناڵ", callback_data="menu_signal"), InlineKeyboardButton("🧠 هۆکاری سیگناڵ", callback_data="menu_reason")],
+        [InlineKeyboardButton("🛡️ پلانی ڕیسک", callback_data="menu_risk"), InlineKeyboardButton("📰 هەواڵ", callback_data="menu_news")],
+        [InlineKeyboardButton("⏱️ تایمفریمەکان", callback_data="menu_timeframes"), InlineKeyboardButton("📚 فێربوون", callback_data="menu_education")],
     ])
 
 
 def section_text(message, section):
     lines = message.splitlines()
-
-    def after_heading(heading, stop_headings):
-        try:
-            start = next(i for i, line in enumerate(lines) if line.strip() == heading)
-        except StopIteration:
-            return ""
-        end = len(lines)
-        for i in range(start + 1, len(lines)):
-            if lines[i].strip() in stop_headings:
-                end = i
-                break
-        return "\n".join(lines[start:end]).strip()
-
     if section == "menu_signal":
         return minimal_signal_message(message)
-    if section == "menu_risk":
-        risk = after_heading(
-            "🛡️ پلانی مامەڵە و ڕیسک",
-            ["📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)"],
-        )
-        return risk or "زانیاریی پلانی ڕیسک بەردەست نییە."
     if section == "menu_reason":
-        reason = next((line for line in lines if line.startswith("🧠 هۆکاری سەرەکی:")), "")
-        technical = after_heading("🔎 نیشانە تەکنیکییەکان", ["🛡️ پلانی مامەڵە و ڕیسک"])
-        return "\n".join(part for part in [reason, technical] if part) or "وردەکاریی هۆکاری سیگناڵ بەردەست نییە."
+        return "🧠 هۆکاری سیگناڵ\n\n" + next((x for x in lines if x.startswith("🧠 Reason:")), "هیچ سیگناڵێکی پشتڕاستکراو نییە.") + "\n\n" + "\n".join(x for x in lines if x.startswith(("• Sweep:", "• Structure:", "• MSS/BOS:", "• FVG:", "• PO3:")))
+    if section == "menu_risk":
+        return "🛡️ پلانی ڕیسک\n\n" + "\n".join(x for x in lines if x.startswith(("ئاراستەی پلان:", "Entry ", "Stop Loss", "Take Profit", "Risk/Reward", "⚠️ WAIT")))
     if section == "menu_news":
-        news = after_heading(
-            "📰 هەواڵ و فەندامێنتاڵ بە کوردیی سۆرانی (RSS؛ فلتەری ڕیسکی ماکرۆ چالاکە)",
-            ["━━━━━━━━━━━━━━━━━━"],
-        )
-        return ("📰 هەواڵ و فەندامێنتاڵ\n\n" + news
-                + "\n\nتێبینی: سەردێڕەکان زانیاریین و بەشێک لە فلتەری سیگناڵ نین.") if news else "ئێستا هەواڵ بەردەست نییە."
+        return "📰 هەواڵ و فەندامێنتاڵ\n\n" + "\n".join(x for x in lines if x.startswith(("📰 News filter:", "⚠️ Macro:", "• ")))[-3500:]
     if section == "menu_timeframes":
-        return after_heading("📊 ئاراستەی تایمفریمەکان", ["🔎 نیشانە تەکنیکییەکان"]) or "زانیاریی تایمفریمەکان بەردەست نییە."
+        return "📊 تایمفریمەکان\n\n" + "\n".join(x for x in lines if x.startswith(("• H4:", "• H1:", "• M15:")))
     if section == "menu_education":
-        return (
-            "📚 فێربوون بە کوردی سۆرانی\n\n"
-            "• EMA20/EMA50: ناوەندی جوڵەی نرخ\n"
-            "• RSI: پێوانەی هێزی جوڵەی نرخ\n"
-            "• Market Structure و BOS: پێکهاتە و شکاندنی پێکهاتە\n"
-            "• MSS: نیشانەی گۆڕانی ئاراستە (خەمڵاندنی سادە)\n"
-            "• FVG: بۆشایی نرخی نێوان کەندڵەکان\n"
-            "• Liquidity Sweep: شکاندنی کاتیی بەرز/نزم و گەڕانەوە\n"
-            "• Order Block: کەندڵی پێچەوانە پێش جوڵەی بەهێز (خەمڵاندن)\n"
-            "• ADX: پێوانەی بەهێزی ترێند، نەک ئاراستە\n"
-            "• PO3: خەمڵاندنی فازی کۆکردنەوە/فێڵ/بڵاوبوونەوە\n"
-            "• Support/Resistance و ATR: پشتگیری/بەرگری و نوسان\n\n"
-            "ئەم دۆزینەوانە خەمڵاندنی کۆدن؛ پێویستیان بە backtest و demo هەیە."
-        )
-    return "بەخێربێیت بۆ HANO BTC AI."
-
-
-async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    log.error("Unhandled Telegram update error", exc_info=context.error)
+        return ("📚 فێربوون\n\n"
+                "• Liquidity Sweep: نرخ liquidityی بەرز/نزم دەشکێنێت و دەگەڕێتەوە.\n"
+                "• Reclaim: داخستنی کەندڵ لە پشتەوەی level.\n"
+                "• Wick/Body: بۆ پشکنینی qualityی sweep.\n"
+                "• Confirmation Window: دوو کەندڵ بۆ پشتڕاستکردنەوە.\n"
+                "• EMA50: فلتەری ئاراستەی ناوخۆ.\n"
+                "• ATR: بنەمای SL.\n"
+                "• 3R: TP = سێ جار مەودای risk.\n"
+                "• FVG / MSS / BOS / PO3: نیشانەی پشتگیرییەکانن، نەک بە تەنیا trigger.")
+    return "🤖 HANO BTC AI"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 HANO BTC AI\n"
-        "سیستەمی شیکاری Bitcoin — BTC/USD\n\n"
-        "بەشێک هەڵبژێرە بۆ بینینی زانیاریی تایبەت بەو بەشە.\n"
-        "بۆتەکە شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات.",
-        reply_markup=main_menu_keyboard(),
-    )
+    await update.message.reply_text("🤖 HANO BTC AI\nسیستەمی نوێی Liquidity Entry Zones بۆ BTC/USD\n\nBUY/SELL تەنها کاتێک دەنێردرێت کە setup پشتڕاست بکرێتەوە.\nبۆتەکە مامەڵە ناکات.", reply_markup=main_menu_keyboard())
 
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    section = query.data
-    if section == "menu_home":
-        await query.edit_message_text(
-            "🤖 HANO BTC AI\nسیستەمی شیکاری Bitcoin — BTC/USD\n\nبەشێک هەڵبژێرە:",
-            reply_markup=main_menu_keyboard(),
-        )
+    if query.data == "menu_home":
+        await query.edit_message_text("🤖 HANO BTC AI\nبەشێک هەڵبژێرە:", reply_markup=main_menu_keyboard())
         return
     try:
         message = await asyncio.to_thread(analyze)
-        body = section_text(message, section)
+        body = section_text(message, query.data)
     except Exception:
         log.exception("menu analysis failed")
-        body = "⚠️ ئێستا نەتوانرا زانیاریی نوێ بهێنرێت. تکایە دواتر دووبارە هەوڵ بدە."
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ گەڕانەوە بۆ مێنیو", callback_data="menu_home")]
-    ])
-    await query.edit_message_text(body, reply_markup=keyboard)
+        body = "⚠️ شیکاری نوێ بەردەست نییە؛ دواتر هەوڵ بدە."
+    await query.edit_message_text(body, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ گەڕانەوە بۆ مێنیو", callback_data="menu_home")]]))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 ڕێنمایی HANO BTC AI\n\n"
-        "/start — پەیامی دەستپێک\n"
-        "/signal — نوێترین شیکاری BTC/USD\n"
-        "/help — ئەم ڕێنماییە\n\n"
-        "لە شیکارییەکەدا: ئاراستە و هۆکار، H4/H1/M15، EMA20/50، RSI، ATR، Support/Resistance، Market Structure، FVG، Volume، Entry/Stop Loss/Take Profit و سەردێڕی هەواڵ دەبینیت.\n\n"
-        "🔔 ئاگادارکردنەوەی ئۆتۆماتیکی تەنها بۆ گۆڕانی ئاراستەی BUY/SELL ـی پشتڕاستکراوەیە؛ WAIT سیگناڵی مامەڵە نییە.\n"
-        "⚠️ بۆتەکە تەنها شیکاری دەکات و هیچ مامەڵەیەک ئۆتۆماتیکی ناکات."
-    )
+    await update.message.reply_text("📖 /start — مێنیو\n/signal — نوێترین BTC signal\n/help — ڕێنمایی\n\nستراتیژی: Liquidity Sweep → Reclaim → Candle Quality → EMA50 → Midline Confirmation → ATR SL → 3R TP.\n⚠️ تەنها شیکاری؛ هیچ tradeی ئۆتۆماتیکی ناکرێت.")
 
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = await asyncio.to_thread(analyze)
-        await update.message.reply_text(minimal_signal_message(message), parse_mode="HTML")
+        await update.message.reply_text(minimal_signal_message(message))
     except Exception:
         log.exception("analysis failed")
-        await update.message.reply_text(
-            "⚠️ ئێستا نەتوانرا شیکاری BTC تەواو بکرێت.\n"
-            "هۆکارەکە لە log ـی بۆتەکە تۆمار کراوە؛ تکایە دواتر /signal دووبارە بکەرەوە."
-        )
+        await update.message.reply_text("⚠️ ئێستا شیکاری BTC تەواو نەکرا. دواتر /signal دووبارە بکەرەوە.")
 
 
 async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
@@ -768,38 +564,27 @@ async def signal_watch_job(context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         message = await asyncio.to_thread(analyze)
-        direction_marker = "🎯 ئەنجام: "
-        direction = next(
-            (line.split(direction_marker, 1)[1].strip()
-             for line in message.splitlines() if direction_marker in line),
-            "WAIT",
-        )
-        candle_marker = "🕒 کەندڵی M15 (UTC): "
-        candle_time = next(
-            (line.split(candle_marker, 1)[1].strip()
-             for line in message.splitlines() if candle_marker in line),
-            "",
-        )
-        current_key = f"{candle_time}:{direction}"
-        previous_key = context.application.bot_data.get("last_alert_key")
-        if previous_key is None:
-            context.application.bot_data["last_alert_key"] = current_key
-            log.info("Watcher baseline set; startup alert suppressed")
+        lines = message.splitlines()
+        direction = next((x.split(":", 1)[1].strip() for x in lines if x.startswith("🎯 SIGNAL:")), "WAIT")
+        candle = next((x.split(":", 1)[1].strip() for x in lines if x.startswith("🕒 M15 completed:")), "")
+        key = f"{candle}:{direction}"
+        old = context.application.bot_data.get("last_alert_key")
+        if old is None:
+            context.application.bot_data["last_alert_key"] = key
+            log.info("Watcher baseline set")
             return
-        previous_direction = previous_key.rsplit(":", 1)[-1]
-        previous_candle = previous_key.rsplit(":", 1)[0]
-        if candle_time and candle_time != previous_candle:
-            # Alert on each newly completed M15 candle with a valid BUY/SELL.
-            # This allows continuation setups to be reported instead of requiring
-            # the direction to flip from BUY to SELL (or vice versa).
+        old_candle = old.rsplit(":", 1)[0]
+        if candle and candle != old_candle:
             if direction in ("BUY", "SELL"):
                 await context.bot.send_message(chat_id=CHAT_ID, text=minimal_signal_message(message))
-                log.info("Signal alert sent: %s at completed M15 candle %s", direction, candle_time)
-            else:
-                log.info("No alert at completed M15 candle %s: WAIT", candle_time)
-            context.application.bot_data["last_alert_key"] = current_key
+                log.info("Alert sent: %s %s", direction, candle)
+            context.application.bot_data["last_alert_key"] = key
     except Exception:
         log.exception("signal watch failed")
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled Telegram update error", exc_info=context.error)
 
 
 def main():
