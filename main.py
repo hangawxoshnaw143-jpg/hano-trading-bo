@@ -231,6 +231,8 @@ def detect_liquidity_entry(candles):
                 "mid": (c["high"] + c["low"]) / 2,
                 "level": swept_low, "wick_pct": lower_pct,
                 "body_pct": body_pct, "range_atr": range_atr,
+                "ema_ok": c["close"] > ema_now,
+                "mid_ok": c["close"] > (c["high"] + c["low"]) / 2,
             }
         if valid_sell_sweep:
             pending_bear = {
@@ -238,6 +240,8 @@ def detect_liquidity_entry(candles):
                 "mid": (c["high"] + c["low"]) / 2,
                 "level": swept_high, "wick_pct": upper_pct,
                 "body_pct": body_pct, "range_atr": range_atr,
+                "ema_ok": c["close"] < ema_now,
+                "mid_ok": c["close"] < (c["high"] + c["low"]) / 2,
             }
 
         bull_open = pending_bull is not None and i - pending_bull["bar"] <= CONFIRMATION_WINDOW
@@ -281,7 +285,10 @@ def detect_liquidity_entry(candles):
             wick_score = min(32.0, score_wick / MIN_WICK_PCT * 32.0)
             body_score = min(24.0, max(0.0, (MAX_BODY_PCT - score_body) / MAX_BODY_PCT) * 24.0)
             range_score = min(18.0, score_range / MIN_RANGE_ATR * 18.0)
-            score = min(100.0, wick_score + body_score + range_score + 10.0 + 10.0 + 6.0)
+            score = min(100.0, wick_score + body_score + range_score
+                        + (10.0 if sweep["ema_ok"] else 0.0)
+                        + 10.0
+                        + (6.0 if sweep["mid_ok"] else 0.0))
             entry = c["close"]
             stop_distance = atr_now * SL_ATR
             sl = entry - stop_distance if direction == "BUY" else entry + stop_distance
