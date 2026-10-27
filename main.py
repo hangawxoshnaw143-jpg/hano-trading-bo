@@ -8,6 +8,7 @@ import requests
 import feedparser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.error import BadRequest
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -438,6 +439,90 @@ def headlines(limit=5):
     return list(items[:limit])
 
 
+
+def liquidity_diagnostics(candles, lookback=15):
+    """Explain WAIT causes without changing the live entry rules."""
+    if len(candles) < 80:
+        return "Insufficient candles for liquidity diagnostics."
+    start = max(EMA_LENGTH - 1, len(candles) - lookback)
+    raw_sweeps = reclaimed = quality_pass = confirmation_pass = 0
+    last_note = "No confirmed pivot liquidity level was swept in the recent window."
+    for i in range(start, len(candles)):
+        c = candles[i]
+        history = candles[:i + 1]
+        atr_now = atr(history, 14)
+        if atr_now <= 0:
+            continue
+        e50 = ema([x["close"] for x in history], EMA_LENGTH)
+        rng = c["high"] - c["low"]
+        if rng <= 0:
+            continue
+        upper_pct = (c["high"] - max(c["open"], c["close"])) / rng
+        lower_pct = (min(c["open"], c["close"]) - c["low"]) / rng
+        body_pct = abs(c["close"] - c["open"]) / rng
+        range_atr = rng / atr_now
+        highs, lows = [], []
+        center = i - PIVOT_LENGTH
+        for p in range(PIVOT_LENGTH, center + 1):
+            window = candles[p-PIVOT_LENGTH:p+PIVOT_LENGTH+1]
+            if len(window) != 2 * PIVOT_LENGTH + 1:
+                continue
+            pc = candles[p]
+            wh = [x["high"] for x in window]
+            wl = [x["low"] for x in window]
+            if pc["high"] == max(wh) and wh.count(pc["high"]) == 1:
+                highs.append((p, pc["high"]))
+            if pc["low"] == min(wl) and wl.count(pc["low"]) == 1:
+                lows.append((p, pc["low"]))
+        swept_high = next((level for p, level in reversed(highs)
+                           if p < i and c["high"] > level
+                           and c["high"] - level >= MIN_SWEEP_ATR * atr_now), None)
+        swept_low = next((level for p, level in reversed(lows)
+                          if p < i and c["low"] < level
+                          and level - c["low"] >= MIN_SWEEP_ATR * atr_now), None)
+        if swept_high is None and swept_low is None:
+            continue
+        raw_sweeps += 1
+        bear_reclaim = swept_high is not None and c["close"] < swept_high
+        bull_reclaim = swept_low is not None and c["close"] > swept_low
+        if not (bear_reclaim or bull_reclaim):
+            last_note = "A pivot was pierced but price did not close back through it (no reclaim)."
+            continue
+        reclaimed += 1
+        quality_ok = body_pct <= MAX_BODY_PCT and range_atr >= MIN_RANGE_ATR
+        bear_valid = bear_reclaim and upper_pct >= MIN_WICK_PCT and quality_ok
+        bull_valid = bull_reclaim and lower_pct >= MIN_WICK_PCT and quality_ok
+        if not (bear_valid or bull_valid):
+            last_note = "A sweep/reclaim occurred, but wick/body/range candle-quality rules failed."
+            continue
+        quality_pass += 1
+        mid = (c["high"] + c["low"]) / 2
+        if bear_valid:
+            confirmed = c["close"] < e50 and c["close"] < mid
+            direction = "SELL"
+        else:
+            confirmed = c["close"] > e50 and c["close"] > mid
+            direction = "BUY"
+        # The strategy permits confirmation on the sweep candle or within the next two bars.
+        for j in range(i + 1, min(len(candles), i + CONFIRMATION_WINDOW + 1)):
+            cj = candles[j]
+            confirmed = confirmed or (
+                (cj["close"] < cj["open"] if direction == "SELL" else cj["close"] > cj["open"])
+                and (cj["close"] < ema([x["close"] for x in candles[:j+1]], EMA_LENGTH)
+                     if direction == "SELL" else cj["close"] > ema([x["close"] for x in candles[:j+1]], EMA_LENGTH))
+                and (cj["close"] < mid if direction == "SELL" else cj["close"] > mid)
+            )
+        if confirmed:
+            confirmation_pass += 1
+            last_note = f"Recent {direction} sweep passed candle quality; EMA50/midpoint confirmation was seen in its window."
+        else:
+            last_note = f"Recent sweep passed candle quality, but EMA50/midpoint confirmation failed."
+    return (
+        f"Recent {lookback} M15 bars: raw sweeps={raw_sweeps}, reclaims={reclaimed}, "
+        f"quality-valid={quality_pass}, confirmation candidates={confirmation_pass}. "
+        + last_note
+    )
+
 def analyze():
     h4, h1, m15 = get_candles("4h"), get_candles("1h"), get_candles("15m")
     s4, s1, s15 = timeframe_summary(h4), timeframe_summary(h1), timeframe_summary(m15)
@@ -448,6 +533,7 @@ def analyze():
     volume_avg = sum(c["volume"] for c in m15[-21:-1]) / 20
     volume_ratio = m15[-1]["volume"] / volume_avg if volume_avg else 0.0
     setup = detect_liquidity_entry(m15)
+    sweep_diagnostic = liquidity_diagnostics(m15)
     news_ok, news_status, impact = fundamental_news_guard()
 
     # Higher timeframes are context; the supplied Liquidity Entry Zones rules are the
@@ -499,6 +585,7 @@ def analyze():
         f"• M15: {s15['trend']} | RSI {s15['rsi']:.1f}\n\n"
         "💧 LIQUIDITY ENTRY ZONES\n"
         f"• Sweep: {sweep_text}\n"
+        f"• Sweep diagnosis: {sweep_diagnostic}\n"
         f"• Structure: {structure}\n"
         f"• MSS/BOS: {mss}\n"
         f"• FVG: {fvg}\n"
@@ -544,7 +631,7 @@ def section_text(message, section):
     if section == "menu_signal":
         return minimal_signal_message(message)
     if section == "menu_reason":
-        return "🧠 هۆکاری سیگناڵ\n\n" + next((x for x in lines if x.startswith("🧠 Reason:")), "هیچ سیگناڵێکی پشتڕاستکراو نییە.") + "\n\n" + "\n".join(x for x in lines if x.startswith(("• Sweep:", "• Structure:", "• MSS/BOS:", "• FVG:", "• PO3:")))
+        return "🧠 هۆکاری سیگناڵ\n\n" + next((x for x in lines if x.startswith("🧠 Reason:")), "هیچ سیگناڵێکی پشتڕاستکراو نییە.") + "\n\n" + "\n".join(x for x in lines if x.startswith(("• Sweep:", "• Sweep diagnosis:", "• Structure:", "• MSS/BOS:", "• FVG:", "• PO3:")))
     if section == "menu_risk":
         return "🛡️ پلانی ڕیسک\n\n" + "\n".join(x for x in lines if x.startswith(("ئاراستەی پلان:", "Entry ", "Stop Loss", "Take Profit", "Risk/Reward", "⚠️ WAIT")))
     if section == "menu_news":
@@ -572,7 +659,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "menu_home":
-        await query.edit_message_text("🤖 HANO BTC AI\nبەشێک هەڵبژێرە:", reply_markup=main_menu_keyboard())
+        try:
+            await query.edit_message_text("🤖 HANO BTC AI\nبەشێک هەڵبژێرە:", reply_markup=main_menu_keyboard())
+        except BadRequest as exc:
+            # Telegram raises this when the menu is already identical; not a bot failure.
+            if "Message is not modified" not in str(exc):
+                raise
         return
     try:
         message = await asyncio.to_thread(analyze)
